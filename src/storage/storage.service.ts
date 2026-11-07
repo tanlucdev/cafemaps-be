@@ -5,8 +5,9 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { execFile } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { lookup } from 'dns/promises';
 import { promises as fsp } from 'fs';
 import { isIP } from 'net';
@@ -31,10 +32,11 @@ const SIPS_PATH = '/usr/bin/sips';
 
 const run = promisify(execFile);
 type UploadedFile = Express.Multer.File;
-type ImageStorageProvider = 'supabase' | 'cloudinary';
+type ImageStorageProvider = 'supabase' | 'cloudinary' | 'r2';
 
 export function getImageStorageProvider(value?: string): ImageStorageProvider {
-  return value === 'cloudinary' ? 'cloudinary' : 'supabase';
+  if (value === 'cloudinary' || value === 'r2') return value;
+  return 'supabase';
 }
 
 export function signCloudinaryParams(params: Record<string, string>, apiSecret: string) {
@@ -102,6 +104,34 @@ export function isSupabasePublicStorageUrl(imageUrl: string, supabaseUrl = '') {
     );
   } catch {
     return false;
+  }
+}
+
+function r2PublicUrlForKey(publicUrl: string, key: string) {
+  const base = new URL(`${publicUrl.replace(/\/$/, '')}/`);
+  return new URL(key.split('/').map(encodeURIComponent).join('/'), base).toString();
+}
+
+export function r2ObjectKeyFromPublicUrl(imageUrl: string, publicUrl: string): string | null {
+  try {
+    const url = new URL(imageUrl);
+    const base = new URL(`${publicUrl.replace(/\/$/, '')}/`);
+    if (
+      url.search ||
+      url.hash ||
+      url.origin !== base.origin ||
+      !url.pathname.startsWith(base.pathname)
+    )
+      return null;
+    const key = url.pathname
+      .slice(base.pathname.length)
+      .split('/')
+      .map(decodeURIComponent)
+      .join('/');
+    if (!key || key.split('/').some((part) => !part || part === '.' || part === '..')) return null;
+    return r2PublicUrlForKey(publicUrl, key) === url.toString() ? key : null;
+  } catch {
+    return null;
   }
 }
 
@@ -174,6 +204,9 @@ export class StorageService {
   private readonly cloudinaryCloudName: string;
   private readonly cloudinaryApiKey: string;
   private readonly cloudinaryApiSecret: string;
+  private readonly r2Bucket: string;
+  private readonly r2PublicUrl: string;
+  private readonly r2Client?: S3Client;
   private readonly targetBytes: number;
   private readonly qualitySteps: number[];
 
@@ -185,6 +218,11 @@ export class StorageService {
     this.cloudinaryCloudName = config.get('CLOUDINARY_CLOUD_NAME', '');
     this.cloudinaryApiKey = config.get('CLOUDINARY_API_KEY', '');
     this.cloudinaryApiSecret = config.get('CLOUDINARY_API_SECRET', '');
+    this.r2Bucket = config.get('R2_BUCKET', '');
+    this.r2PublicUrl = config.get('R2_PUBLIC_URL', '');
+    const r2AccountId = config.get('R2_ACCOUNT_ID', '');
+    const r2AccessKeyId = config.get('R2_ACCESS_KEY_ID', '');
+    const r2SecretAccessKey = config.get('R2_SECRET_ACCESS_KEY', '');
     this.targetBytes =
       readNumberConfig(config.get('IMAGE_MAX_OUTPUT_KB'), DEFAULT_TARGET_KB) * 1024;
     this.qualitySteps = buildQualitySteps(
@@ -201,11 +239,49 @@ export class StorageService {
       );
     }
 
-    if (this.supabaseKey && !isSupportedSupabaseSecret(this.supabaseKey)) {
+    if (
+      this.provider === 'supabase' &&
+      this.supabaseKey &&
+      !isSupportedSupabaseSecret(this.supabaseKey)
+    ) {
       throw new Error(
         'SUPABASE_SERVICE_KEY must be a Supabase secret key. ' +
           'Use a new sb_secret_ key or a legacy service_role JWT from Supabase Project Settings → API Keys.',
       );
+    }
+
+    if (this.provider === 'r2') {
+      if (
+        !r2AccountId ||
+        !r2AccessKeyId ||
+        !r2SecretAccessKey ||
+        !this.r2Bucket ||
+        !this.r2PublicUrl
+      ) {
+        throw new Error(
+          'R2 requires R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET, and R2_PUBLIC_URL',
+        );
+      }
+      try {
+        const publicUrl = new URL(this.r2PublicUrl);
+        if (
+          !['http:', 'https:'].includes(publicUrl.protocol) ||
+          publicUrl.username ||
+          publicUrl.password ||
+          publicUrl.search ||
+          publicUrl.hash
+        )
+          throw new Error();
+      } catch {
+        throw new Error(
+          'R2_PUBLIC_URL must be an absolute http(s) URL without credentials or query',
+        );
+      }
+      this.r2Client = new S3Client({
+        region: 'auto',
+        endpoint: `https://${r2AccountId}.r2.cloudflarestorage.com`,
+        credentials: { accessKeyId: r2AccessKeyId, secretAccessKey: r2SecretAccessKey },
+      });
     }
   }
 
@@ -360,6 +436,7 @@ export class StorageService {
 
   async uploadImage(file: UploadedFile, folder: string = 'cafes'): Promise<string> {
     if (this.provider === 'cloudinary') return this.uploadImageToCloudinary(file, folder);
+    if (this.provider === 'r2') return this.uploadImageToR2(file, folder);
     return this.uploadImageToSupabase(file, folder);
   }
 
@@ -503,8 +580,59 @@ export class StorageService {
     return parsed.secure_url;
   }
 
+  private async uploadImageToR2(file: UploadedFile, folder: string): Promise<string> {
+    if (!this.r2Client || !this.r2Bucket || !this.r2PublicUrl)
+      throw new InternalServerErrorException('R2 is not configured');
+
+    let webpBuffer: Buffer;
+    try {
+      webpBuffer = await this.convertToBestWebp(file);
+    } catch (error) {
+      throw new InternalServerErrorException(
+        `Image conversion failed: ${(error as Error).message}`,
+      );
+    }
+
+    const key = `${folder.replace(/^\/+|\/+$/g, '')}/${Date.now()}-${randomUUID()}-${safePublicIdBaseName(file.originalname)}.webp`;
+    try {
+      await this.r2Client.send(
+        new PutObjectCommand({
+          Bucket: this.r2Bucket,
+          Key: key,
+          Body: webpBuffer,
+          ContentType: 'image/webp',
+        }),
+        { abortSignal: AbortSignal.timeout(30_000) },
+      );
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          type: 'r2.upload.failed',
+          name: error?.name,
+          status: error?.$metadata?.httpStatusCode,
+        }),
+      );
+      if (error?.name === 'AbortError' || error?.name === 'TimeoutError')
+        throw new GatewayTimeoutException('Image storage upload timed out');
+      throw new BadGatewayException('Image storage upload failed');
+    }
+    return r2PublicUrlForKey(this.r2PublicUrl, key);
+  }
+
   async deleteImage(imageUrl: string): Promise<void> {
     if (isCloudinaryUrl(imageUrl)) return this.deleteCloudinaryImage(imageUrl);
+    if (this.r2Client && this.r2Bucket && this.r2PublicUrl) {
+      const key = r2ObjectKeyFromPublicUrl(imageUrl, this.r2PublicUrl);
+      if (!key) return;
+      try {
+        await this.r2Client.send(new DeleteObjectCommand({ Bucket: this.r2Bucket, Key: key }), {
+          abortSignal: AbortSignal.timeout(30_000),
+        });
+      } catch {
+        throw new BadGatewayException('Image storage is unavailable');
+      }
+      return;
+    }
     if (this.provider !== 'supabase') return;
     if (!this.supabaseUrl || !this.supabaseKey) return;
 
