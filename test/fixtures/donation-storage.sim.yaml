@@ -1,0 +1,6 @@
+simulation: donation-storage
+routing: path
+mocks:
+  - name: donation-storage
+    routeKey: storage
+    path: ./donation-storage/config.yaml
