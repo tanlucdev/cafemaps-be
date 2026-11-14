@@ -1,0 +1,9 @@
+version: 1
+name: donation-storage
+slug: donation-storage
+protocol: http
+port: 4500
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true

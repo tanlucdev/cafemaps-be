@@ -1,0 +1,16 @@
+purpose:
+  stands_in_for: Supabase image storage HTTP upload, read and delete operations
+  unblocks: Local donation settings save and upload failure checks without production writes
+assumptions:
+  - id: storage-upload-response
+    status: unknown
+    claim: Supabase accepts converted WebP and makes its public URL readable after a successful upload.
+    reason: The stand-in models this behavior; it does not establish real provider availability or bucket permissions.
+    verification: Local Nest backend with PostgreSQL and this simulation passed upload/read, storage-503 preserves settings, and CMS-to-frontend QR replacement checks. Apple Vision decoded the converted sample QR to the same payload as the original. Real Supabase not called.
+    source: src/storage/storage.service.ts; test/fixtures/donation-storage/default.js
+    updated_at: '2026-11-14'
+fingerprints:
+  - id: donation-settings-local-qa
+    date: '2026-11-14'
+    commit: 'e2c7ba13efb0c6a4c148785204654e3d38762ecd (dirty tree, donation settings changes)'
+    cli: '1.75.0'

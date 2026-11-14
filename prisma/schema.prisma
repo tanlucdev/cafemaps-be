@@ -308,3 +308,15 @@ enum PriceRange {
   k_150k     @map("100k_150k")
   above_150k
 }
+
+model DonationSettings {
+  id            Int     @id @default(1)
+  enabled       Boolean @default(true)
+  qrImageUrl    String? @map("qr_image_url")
+  titleVi       String? @map("title_vi") @db.VarChar(120)
+  titleEn       String? @map("title_en") @db.VarChar(120)
+  descriptionVi String? @map("description_vi") @db.VarChar(500)
+  descriptionEn String? @map("description_en") @db.VarChar(500)
+
+  @@map("donation_settings")
+}

@@ -1,3 +1,4 @@
+import { DonationSettingsModule } from './donation-settings/donation-settings.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from './prisma/prisma.module';
@@ -16,6 +17,7 @@ import { HealthController } from './health.controller';
 
 @Module({
   imports: [
+    DonationSettingsModule,
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
     CafesModule,
