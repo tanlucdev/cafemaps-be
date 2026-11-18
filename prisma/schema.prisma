@@ -87,6 +87,7 @@ model Cafe {
   coverImageCrop    Json?                     @map("cover_image_crop")
   menuImage         String?                   @map("menu_image")
   menuImages        String[]                  @default([]) @map("menu_images")
+  imageSourceUsernames String[]               @default([]) @map("image_source_usernames")
   instagramUrl      String?                   @map("instagram_url")
   isFeatured        Boolean?                  @default(false) @map("is_featured")
   featuredOrder     Int?                      @map("featured_order")
@@ -107,6 +108,7 @@ model Cafe {
   createdFromSubmissions CafeSubmission[]
   chainId           String?                  @map("chain_id") @db.Uuid
   chain             Chain?                   @relation(fields: [chainId], references: [id], onDelete: SetNull)
+  @@index([imageSourceUsernames], map: "idx_cafes_image_source_usernames", type: Gin)
   @@index([amenities], map: "idx_cafes_amenities", type: Gin)
   @@index([tags], map: "idx_cafes_tags", type: Gin)
   @@index([tagsEn], map: "idx_cafes_tags_en", type: Gin)
