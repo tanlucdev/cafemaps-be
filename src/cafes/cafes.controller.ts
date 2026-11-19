@@ -183,7 +183,10 @@ export class CafesController {
 
   @Get(':slug')
   @Header('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
-  @ApiOperation({ summary: 'Get cafe details by slug' })
+  @ApiOperation({
+    summary: 'Get cafe details by slug',
+    description: 'Includes imageSourceUsernames, an array of Instagram usernames supplying gallery images. Empty when no source is recorded. Cafe-level sources, not per-image authorship.',
+  })
   findOne(@Param('slug') slug: string, @Query('locale') locale?: string) {
     return this.cafesService.findBySlug(slug, locale);
   }
