@@ -1,10 +1,12 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import type {} from 'multer';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { CreateCommunitySubmissionDto } from './dto/create-community-submission.dto';
+import { SubmissionMediaService } from './submission-media.service';
+import { lockDraft, mergeDraftMedia, validatePayloadMedia } from './submission-media.helpers';
 import { CreateSubmissionDto } from './dto/create-submission.dto';
 
 type UploadedFile = Express.Multer.File;
@@ -28,19 +30,6 @@ function imageCount(payload: unknown) {
 
 function validateOwnerGalleryImageCount(submissionType: string | undefined, payload: unknown) {
   if (submissionType === 'owner' && imageCount(payload) > MAX_OWNER_GALLERY_IMAGES)
-    throw new BadRequestException(OWNER_GALLERY_IMAGE_LIMIT_MESSAGE);
-}
-
-function validateOwnerGalleryUpload(
-  submission: { submissionType?: string; payload: unknown },
-  fileCount: number,
-  field: 'images' | 'menuImages',
-) {
-  if (
-    field === 'images' &&
-    submission.submissionType === 'owner' &&
-    imageCount(submission.payload) + fileCount > MAX_OWNER_GALLERY_IMAGES
-  )
     throw new BadRequestException(OWNER_GALLERY_IMAGE_LIMIT_MESSAGE);
 }
 
@@ -97,9 +86,11 @@ export class SubmissionsService {
   constructor(
     private prisma: PrismaService,
     private storage: StorageService,
+    private media: SubmissionMediaService,
   ) {}
 
   async create(userId: string, dto: CreateSubmissionDto) {
+    validatePayloadMedia(dto.payload);
     const submissionType = dto.submissionType ?? 'community';
     validateOwnerGalleryImageCount(submissionType, dto.payload);
     return this.prisma.cafeSubmission.create({
@@ -155,98 +146,47 @@ export class SubmissionsService {
   }
 
   async update(userId: string, id: string, dto: CreateSubmissionDto) {
-    const submission = await this.prisma.cafeSubmission.findFirst({
-      where: { id, submittedById: userId, status: 'draft', isHidden: false },
-      select: { id: true, submissionType: true },
-    });
-    if (!submission) throw new NotFoundException(`Submission not found: ${id}`);
-    validateOwnerGalleryImageCount(submission.submissionType, dto.payload);
-
-    return this.prisma.cafeSubmission.update({
-      where: { id },
-      data: {
-        name: dto.name,
-        submissionType: submission.submissionType,
-        address: dto.address,
-        googleMapsUrl: dto.googleMapsUrl,
-        note: dto.note,
-        payload: (dto.payload ?? null) as Prisma.InputJsonValue,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const submission = await lockDraft(tx, userId, id);
+      validatePayloadMedia(dto.payload);
+      validateOwnerGalleryImageCount(submission.submissionType, dto.payload);
+      const payload = mergeDraftMedia(submission.payload, dto.payload);
+      validateOwnerGalleryImageCount(submission.submissionType, payload);
+      return tx.cafeSubmission.update({
+        where: { id },
+        data: {
+          name: dto.name,
+          submissionType: submission.submissionType,
+          address: dto.address,
+          googleMapsUrl: dto.googleMapsUrl,
+          note: dto.note,
+          payload: payload as Prisma.InputJsonValue,
+        },
+      });
     });
   }
 
-  async uploadImage(
-    userId: string,
-    id: string,
-    file: UploadedFile,
-    field: 'images' | 'menuImages',
-  ) {
-    return this.uploadImages(userId, id, [file], field);
+  uploadImage(userId: string, id: string, file: UploadedFile, field: 'images' | 'menuImages') {
+    return this.media.uploadImages(userId, id, [file], field);
   }
 
-  async uploadImages(
-    userId: string,
-    id: string,
-    files: UploadedFile[],
-    field: 'images' | 'menuImages',
-  ) {
-    const submission = await this.prisma.cafeSubmission.findFirst({
-      where: { id, submittedById: userId, status: 'draft', isHidden: false },
-    });
-    if (!submission) throw new NotFoundException(`Submission not found: ${id}`);
-    validateOwnerGalleryUpload(submission, files.length, field);
+  uploadImages(userId: string, id: string, files: UploadedFile[], field: 'images' | 'menuImages') {
+    return this.media.uploadImages(userId, id, files, field);
+  }
 
-    const uploadedUrls: string[] = [];
-    try {
-      const newUrls = await mapLimit(files, 2, async (file) => {
-        const url = await this.storage.uploadImage(file, `submissions/${id}/${field}`);
-        uploadedUrls.push(url);
-        return url;
-      });
-
-      return await this.prisma.$transaction(async (tx) => {
-        await tx.$queryRaw(
-          Prisma.sql`SELECT 1 FROM "cafe_submissions" WHERE "id" = CAST(${id} AS uuid) FOR UPDATE`,
-        );
-        const latest = await tx.cafeSubmission.findFirst({
-          where: { id, submittedById: userId, status: 'draft', isHidden: false },
-        });
-        if (!latest) throw new NotFoundException(`Submission not found: ${id}`);
-        validateOwnerGalleryUpload(latest, newUrls.length, field);
-        const payload = payloadObject(latest.payload);
-        const urls = Array.isArray(payload[field]) ? (payload[field] as string[]) : [];
-        payload[field] = [...urls, ...newUrls];
-        if (field === 'images') {
-          payload.imageOrientations = [
-            ...(Array.isArray(payload.imageOrientations) ? payload.imageOrientations : []),
-            ...newUrls.map(() => 'unknown'),
-          ];
-          payload.coverImage =
-            typeof payload.coverImage === 'string' ? payload.coverImage : newUrls[0];
-          payload.coverImageCrop = payload.coverImageCrop ?? { x: 50, y: 50 };
-        }
-
-        return tx.cafeSubmission.update({
-          where: { id },
-          data: { payload: payload as Prisma.InputJsonValue },
-        });
-      });
-    } catch (error) {
-      await Promise.allSettled(uploadedUrls.map((url) => this.storage.deleteImage(url)));
-      throw error;
-    }
+  deleteImage(userId: string, id: string, url: string) {
+    return this.media.deleteImage(userId, id, url);
   }
 
   async submit(userId: string, id: string) {
-    const submission = await this.prisma.cafeSubmission.findFirst({
-      where: { id, submittedById: userId, status: 'draft', isHidden: false },
-    });
-    if (!submission) throw new NotFoundException(`Submission not found: ${id}`);
-    if (submission.submissionType === 'owner') validateOwnerPayload(submission);
-
-    return this.prisma.cafeSubmission.update({
-      where: { id },
-      data: { status: 'pending' },
+    return this.prisma.$transaction(async (tx) => {
+      const submission = await lockDraft(tx, userId, id);
+      if (await tx.submissionAsset.count({ where: { submissionId: id, status: 'delete_pending' } }))
+        throw new BadRequestException(
+          'Image deletion is pending; retry deletion before submitting',
+        );
+      if (submission.submissionType === 'owner') validateOwnerPayload(submission);
+      return tx.cafeSubmission.update({ where: { id }, data: { status: 'pending' } });
     });
   }
 

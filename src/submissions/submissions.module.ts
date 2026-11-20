@@ -1,3 +1,4 @@
+import { SubmissionMediaService } from './submission-media.service';
 import { Module } from '@nestjs/common';
 import { StorageModule } from '../storage/storage.module';
 import { SubmissionsController } from './submissions.controller';
@@ -8,6 +9,6 @@ import { SubmissionsService } from './submissions.service';
 @Module({
   imports: [StorageModule],
   controllers: [SubmissionsController, SubmissionAssetsController],
-  providers: [SubmissionsService, SubmissionAssetsService],
+  providers: [SubmissionMediaService, SubmissionsService, SubmissionAssetsService],
 })
 export class SubmissionsModule {}
