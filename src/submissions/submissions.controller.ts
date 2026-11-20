@@ -1,8 +1,8 @@
 import {
-  BadRequestException,
   Body,
   Controller,
-  FileValidator,
+  Delete,
+  ParseUUIDPipe,
   Get,
   MaxFileSizeValidator,
   Param,
@@ -15,69 +15,36 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiBody, ApiConsumes } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiResponse,
+} from '@nestjs/swagger';
 import type {} from 'multer';
 import { SubmissionsService } from './submissions.service';
 import { CreateSubmissionDto } from './dto/create-submission.dto';
 import { CreateCommunitySubmissionDto } from './dto/create-community-submission.dto';
 import { JwtAuthGuard, OptionalJwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import {
+  ImageUploadFileValidator,
+  validateBatchFiles,
+  validateCommunityFiles,
+  MAX_IMAGE_BYTES,
+  MAX_BATCH_IMAGES,
+  MAX_COMMUNITY_IMAGES,
+  UploadResponse,
+} from './submission-upload.validation';
+export {
+  ImageUploadFileValidator,
+  validateBatchFiles,
+  validateCommunityFiles,
+} from './submission-upload.validation';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 type UploadedFile = Express.Multer.File;
-
-const ACCEPTED_IMAGE_MIME_TYPES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'image/heic',
-  'image/heif',
-  'image/heic-sequence',
-  'image/heif-sequence',
-  'image/avif',
-  'image/tiff',
-]);
-const ACCEPTED_IMAGE_EXTENSIONS = /\.(jpe?g|png|webp|heic|heics|heif|heifs|avif|tiff?)$/i;
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-const MAX_BATCH_BYTES = 40 * 1024 * 1024;
-const MAX_BATCH_IMAGES = 12;
-const MAX_COMMUNITY_IMAGES = 8;
-
-export class ImageUploadFileValidator extends FileValidator<Record<string, never>> {
-  isValid(file?: UploadedFile): boolean {
-    if (!file) return false;
-    return (
-      ACCEPTED_IMAGE_MIME_TYPES.has(file.mimetype) ||
-      ACCEPTED_IMAGE_EXTENSIONS.test(file.originalname)
-    );
-  }
-
-  buildErrorMessage(): string {
-    return 'File must be a JPEG, PNG, WebP, HEIC, HEIF, AVIF, or TIFF image';
-  }
-}
-
-export function validateBatchFiles(files: UploadedFile[]) {
-  const validator = new ImageUploadFileValidator({});
-  if (!files.length) throw new BadRequestException('At least one file is required');
-  if (files.reduce((total, file) => total + file.size, 0) > MAX_BATCH_BYTES)
-    throw new BadRequestException('Batch is too large');
-  for (const file of files) {
-    if (file.size > MAX_IMAGE_BYTES) throw new BadRequestException('File is too large');
-    if (!validator.isValid(file)) throw new BadRequestException(validator.buildErrorMessage());
-  }
-}
-
-export function validateCommunityFiles(files: UploadedFile[]) {
-  const validator = new ImageUploadFileValidator({});
-  if (files.length > MAX_COMMUNITY_IMAGES)
-    throw new BadRequestException(`At most ${MAX_COMMUNITY_IMAGES} images are allowed`);
-  if (files.reduce((total, file) => total + file.size, 0) > MAX_BATCH_BYTES)
-    throw new BadRequestException('Batch is too large');
-  for (const file of files) {
-    if (file.size > MAX_IMAGE_BYTES) throw new BadRequestException('File is too large');
-    if (!validator.isValid(file)) throw new BadRequestException(validator.buildErrorMessage());
-  }
-}
 
 @ApiTags('Submissions')
 @Controller('submissions')
@@ -125,7 +92,11 @@ export class SubmissionsController {
   @Patch(':id')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Update current user cafe submission draft' })
-  update(@CurrentUser() user: any, @Param('id') id: string, @Body() dto: CreateSubmissionDto) {
+  update(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateSubmissionDto,
+  ) {
     return this.submissionsService.update(user.id, id, dto);
   }
 
@@ -139,21 +110,57 @@ export class SubmissionsController {
   @Post(':id/submit')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Submit current user draft for admin review' })
-  submit(@CurrentUser() user: any, @Param('id') id: string) {
+  submit(@CurrentUser() user: any, @Param('id', ParseUUIDPipe) id: string) {
     return this.submissionsService.submit(user.id, id);
   }
 
+  @Delete(':id/images')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Delete a recorded draft asset; retry on storage failure' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['url'],
+      properties: { url: { type: 'string', format: 'uri' } },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Current submission after deletion; repeat DELETE retries pending storage cleanup',
+  })
+  @ApiResponse({ status: 404, description: 'Draft or recorded asset not owned by user' })
+  @ApiResponse({
+    status: 502,
+    description: 'Storage deletion failed; retry same URL; submit blocked',
+  })
+  @ApiResponse({
+    status: 504,
+    description: 'Legacy image storage deletion timed out; pending asset retained for retry',
+  })
+  deleteImage(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('url') url: string,
+  ) {
+    return this.submissionsService.deleteImage(user.id, id, url);
+  }
+
   @Post(':id/images')
+  @UploadResponse()
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Upload gallery image for current user submission' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
-    schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } },
+    schema: {
+      type: 'object',
+      required: ['file'],
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
   })
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_IMAGE_BYTES } }))
   uploadImage(
     @CurrentUser() user: any,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @UploadedFile(
       new ParseFilePipe({
         validators: [
@@ -164,44 +171,49 @@ export class SubmissionsController {
     )
     file: UploadedFile,
   ) {
-    console.warn(JSON.stringify({ type: 'submission.multipart.deprecated', endpoint: 'images' }));
     return this.submissionsService.uploadImage(user.id, id, file, 'images');
   }
 
   @Post(':id/images/batch')
+  @UploadResponse()
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Upload gallery images for current user submission' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
       type: 'object',
+      required: ['files'],
       properties: { files: { type: 'array', items: { type: 'string', format: 'binary' } } },
     },
   })
-  @UseInterceptors(FilesInterceptor('files', MAX_BATCH_IMAGES))
+  @UseInterceptors(
+    FilesInterceptor('files', MAX_BATCH_IMAGES, { limits: { fileSize: MAX_IMAGE_BYTES } }),
+  )
   uploadImages(
     @CurrentUser() user: any,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @UploadedFiles() files: UploadedFile[],
   ) {
-    console.warn(
-      JSON.stringify({ type: 'submission.multipart.deprecated', endpoint: 'images.batch' }),
-    );
     validateBatchFiles(files);
     return this.submissionsService.uploadImages(user.id, id, files, 'images');
   }
 
   @Post(':id/menu')
+  @UploadResponse()
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Upload menu image for current user submission' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
-    schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } },
+    schema: {
+      type: 'object',
+      required: ['file'],
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
   })
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_IMAGE_BYTES } }))
   uploadMenuImage(
     @CurrentUser() user: any,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @UploadedFile(
       new ParseFilePipe({
         validators: [
@@ -212,29 +224,29 @@ export class SubmissionsController {
     )
     file: UploadedFile,
   ) {
-    console.warn(JSON.stringify({ type: 'submission.multipart.deprecated', endpoint: 'menu' }));
     return this.submissionsService.uploadImage(user.id, id, file, 'menuImages');
   }
 
   @Post(':id/menu/batch')
+  @UploadResponse()
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Upload menu images for current user submission' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
       type: 'object',
+      required: ['files'],
       properties: { files: { type: 'array', items: { type: 'string', format: 'binary' } } },
     },
   })
-  @UseInterceptors(FilesInterceptor('files', MAX_BATCH_IMAGES))
+  @UseInterceptors(
+    FilesInterceptor('files', MAX_BATCH_IMAGES, { limits: { fileSize: MAX_IMAGE_BYTES } }),
+  )
   uploadMenuImages(
     @CurrentUser() user: any,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @UploadedFiles() files: UploadedFile[],
   ) {
-    console.warn(
-      JSON.stringify({ type: 'submission.multipart.deprecated', endpoint: 'menu.batch' }),
-    );
     validateBatchFiles(files);
     return this.submissionsService.uploadImages(user.id, id, files, 'menuImages');
   }
