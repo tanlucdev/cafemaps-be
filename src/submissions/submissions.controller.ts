@@ -133,6 +133,10 @@ export class SubmissionsController {
     status: 502,
     description: 'Storage deletion failed; retry same URL; submit blocked',
   })
+  @ApiResponse({
+    status: 504,
+    description: 'Legacy image storage deletion timed out; pending asset retained for retry',
+  })
   deleteImage(
     @CurrentUser() user: any,
     @Param('id', ParseUUIDPipe) id: string,

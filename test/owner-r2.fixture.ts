@@ -38,7 +38,8 @@ export async function ownerFixture() {
       );
       return;
     }
-    if (mode === 'timeout' && req.method === 'PUT') {
+    if ((mode === 'timeout' || mode === 'response_lost') && req.method === 'PUT') {
+      if (mode === 'response_lost') objects.set(path, body);
       req.socket.destroy();
       return;
     }

@@ -152,13 +152,65 @@ test(
           assert.equal(f.requests.length, beforeSubmitted);
         },
       );
+      await t.test(
+        'Cloudinary deletion failure keeps its pending record until verified retry succeeds',
+        async () => {
+          const draft = await f.create();
+          const publicId = `submissions/${draft.id}/images/legacy`;
+          const url = `https://res.cloudinary.com/test/image/upload/v1/${publicId}.webp`;
+          await f.db.cafeSubmission.update({
+            where: { id: draft.id },
+            data: {
+              payload: {
+                images: [url],
+                imageOrientations: ['portrait'],
+                coverImage: url,
+              },
+            },
+          });
+          await f.db.submissionAsset.create({
+            data: {
+              submissionId: draft.id,
+              publicId,
+              secureUrl: url,
+              field: 'images',
+              status: 'persisted',
+              expiresAt: new Date(),
+            },
+          });
+          const originalFetch = global.fetch;
+          let failed = true;
+          global.fetch = async (input, init) =>
+            String(input).startsWith('https://api.cloudinary.com/')
+              ? new Response(
+                  JSON.stringify(failed ? { error: 'unavailable' } : { result: 'not found' }),
+                  { status: failed ? 503 : 200 },
+                )
+              : originalFetch(input, init);
+          try {
+            assert.equal((await remove(draft.id, url)).status, 502);
+            const asset = await f.db.submissionAsset.findUnique({ where: { publicId } });
+            assert.equal(asset.status, 'delete_pending');
+            const submission = await f.request(`/${draft.id}/submit`, { method: 'POST' });
+            assert.equal(submission.status, 400);
+            assert.match(await submission.text(), /deletion is pending/);
+            failed = false;
+            assert.equal((await remove(draft.id, url)).status, 200);
+            assert.equal(await f.db.submissionAsset.findUnique({ where: { publicId } }), null);
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      );
       await t.test('storage 5xx/connection loss never commits URLs', async () => {
         const draft = await f.create();
-        for (const mode of ['fail', 'timeout']) {
+        const beforeObjects = f.objects.size;
+        for (const mode of ['fail', 'timeout', 'response_lost']) {
           f.mode(mode);
-          assert.equal((await upload(draft.id)).status, mode === 'timeout' ? 504 : 502);
+          assert.equal((await upload(draft.id)).status, mode === 'fail' ? 502 : 504);
           const latest: any = await f.db.cafeSubmission.findUnique({ where: { id: draft.id } });
           assert.equal(latest.payload.images, undefined);
+          assert.equal(f.objects.size, beforeObjects);
         }
         f.mode('ok');
       });

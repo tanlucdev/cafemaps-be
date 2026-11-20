@@ -6,13 +6,19 @@ Deploy backend before FE. Configure `IMAGE_STORAGE_PROVIDER=r2` and all five exi
 
 Uploads run outside transactions. The transaction locks the draft, rereads membership/quota/status, saves payload and asset records together. Losing requests compensate uploaded objects; failed compensation logs submission ID and URL. Save preserves current media membership while accepting order/metadata edits. Removing membership requires DELETE; stale saves cannot reintroduce deleted media.
 
+When an R2 PUT may have committed before its response was lost, storage attempts DELETE with that exact generated key before propagating the original upload error. Failed cleanup logs `r2.upload.cleanup.failed` with bucket/key; operators can trace an object that could not be removed. The HTTP test persists the PUT and drops its response, then verifies the matching DELETE and unchanged DB.
+
+Deleting legacy Cloudinary assets requires the existing `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` credentials. Missing credentials, HTTP failures, malformed/unsuccessful JSON and timeouts now return errors; only `result: "ok"` or `"not found"` with HTTP success confirms cleanup. The pending asset record survives errors and submit remains blocked until retry succeeds. New R2 uploads need no new environment variables.
+
+Storage helpers were extracted from the existing oversized service to keep each source file below 300 lines. The same service/provider selection and public helper exports remain; no storage abstraction or dependency was added.
+
 DELETE locks the draft and marks the recorded asset `delete_pending` before storage cleanup. Failure returns an error, retains the record and blocks submit. Retry the same URL even after it leaves payload. After successful cleanup, a repeated DELETE returns 404 without modifying another asset.
 
 ## Verification
 
-- `npm test`: 197 pass; the opt-in HTTP suite skips without its explicit test DB.
+- `npm test`: 199 pass; the opt-in HTTP suite skips without its explicit test DB.
 - `npm run build`, `npx tsc --noEmit`, targeted ESLint: pass.
-- HTTP suite: 9 pass against real local PostgreSQL and a local S3 HTTP server. Exercises multipart, WebP bytes/public URL, JWT, UUID/owner/status, 20 MiB rejection, quota contention, stale save, submit race, delete retry, cover/orientation, storage 503/connection failure and legacy signatures/community upload.
+- HTTP suite: 10 pass against real local PostgreSQL and a local S3 HTTP server. Exercises multipart, WebP bytes/public URL, JWT, UUID/owner/status, 20 MiB rejection, quota contention, stale save, submit race, delete retry, cover/orientation, storage 503, committed PUT with lost response, Cloudinary deletion failure/retry and legacy signatures/community upload.
 - Failure unit checks inject DB rollback and failed compensation, preserving the original error and logging cleanup failures.
 - Paired FE browser check covers gallery/menu, order, two requests, cover, delete failure/retry, failed-upload replacement, preview and save/submit; asserts no Cloudinary POST.
 
@@ -32,4 +38,4 @@ For the FE browser harness, start `OWNER_R2_TEST_DATABASE_URL=... TS_NODE_PREFER
 
 ## Release smoke test
 
-Upload one gallery and one menu image. Confirm public URLs load, draft and preview retain them, Network contains no Cloudinary upload, then delete the test images. Production remains unverified until this smoke test runs. No merge/deploy performed here. Rolling FE back to Cloudinary may restore the original upload failure; it is not a reliable upload recovery. Existing Cloudinary 401 recovery is a separate task.
+Upload one gallery and one menu image. Confirm public URLs load, draft and preview retain them, Network contains no Cloudinary upload, then delete the test images. Production remains unverified until this smoke test runs. No merge or production deployment performed here. Rolling FE back to Cloudinary may restore the original upload failure; it is not a reliable upload recovery. Existing Cloudinary 401 recovery is a separate task.
