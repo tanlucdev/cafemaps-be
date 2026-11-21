@@ -72,6 +72,9 @@ export class CafesController {
     @Query('radius') radius: number = 2,
     @Query('distanceMode') distanceMode: 'straight' | 'route' = 'straight',
     @Query('locale') locale?: string,
+    @Query('search') search?: string,
+    @Query('vibes') vibes?: string,
+    @Query('purposes') purposes?: string,
   ) {
     return this.cafesService.findNearby(
       +lat,
@@ -79,6 +82,7 @@ export class CafesController {
       +radius,
       distanceMode === 'route' ? 'route' : 'straight',
       locale,
+      { search, vibes: vibes?.split(',').filter(Boolean), purposes: purposes?.split(',').filter(Boolean) },
     );
   }
 

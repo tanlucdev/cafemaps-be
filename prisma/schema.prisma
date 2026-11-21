@@ -32,6 +32,12 @@ model User {
   recentlyViewedCafes RecentlyViewedCafe[]
   cafeReviews         CafeReview[]
   quizResults         QuizResult[]
+  organizedCoffeeMeetups CoffeeMeetup[]        @relation("CoffeeMeetupOrganizer")
+  hiddenCoffeeMeetups    CoffeeMeetup[]        @relation("CoffeeMeetupHiddenBy")
+  coffeeMeetupRequests   CoffeeMeetupRequest[]
+  coffeeMeetupReports    CoffeeMeetupReport[]  @relation("CoffeeMeetupReporter")
+  resolvedMeetupReports  CoffeeMeetupReport[]  @relation("CoffeeMeetupResolvedBy")
+
   @@map("users")
 }
 model PasswordResetToken {
@@ -109,6 +115,8 @@ model Cafe {
   chainId           String?                  @map("chain_id") @db.Uuid
   chain             Chain?                   @relation(fields: [chainId], references: [id], onDelete: SetNull)
   @@index([imageSourceUsernames], map: "idx_cafes_image_source_usernames", type: Gin)
+  coffeeMeetups          CoffeeMeetup[]
+
   @@index([amenities], map: "idx_cafes_amenities", type: Gin)
   @@index([tags], map: "idx_cafes_tags", type: Gin)
   @@index([tagsEn], map: "idx_cafes_tags_en", type: Gin)
@@ -307,6 +315,83 @@ model CafeReview {
   @@index([userId], map: "idx_cafe_reviews_user_id")
   @@map("cafe_reviews")
 }
+model CoffeeMeetup {
+  id              String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cafeId          String?               @map("cafe_id") @db.Uuid
+  externalPlaceName String?             @map("external_place_name")
+  externalGoogleMapsUrl String?         @map("external_google_maps_url")
+  organizerId     String                @map("organizer_id") @db.Uuid
+  purpose         String
+  purposeIcon     String?               @map("purpose_icon")
+  purposeColor    String?               @map("purpose_color")
+  invitationTemplate String?            @map("invitation_template")
+  invitationColor String?               @map("invitation_color")
+  title           String
+  description     String?
+  contactInfo     String?               @map("contact_info")
+  startsAt        DateTime              @map("starts_at") @db.Timestamptz(6)
+  endsAt          DateTime              @map("ends_at") @db.Timestamptz(6)
+  maxParticipants Int                   @map("max_participants")
+  status          String                @default("open")
+  isHidden        Boolean               @default(false) @map("is_hidden")
+  adminNote       String?               @map("admin_note")
+  hiddenAt        DateTime?             @map("hidden_at") @db.Timestamptz(6)
+  hiddenById      String?               @map("hidden_by_id") @db.Uuid
+  cancelledAt     DateTime?             @map("cancelled_at") @db.Timestamptz(6)
+  completedAt     DateTime?             @map("completed_at") @db.Timestamptz(6)
+  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime              @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  cafe            Cafe?                 @relation(fields: [cafeId], references: [id], onDelete: Restrict)
+  organizer       User                  @relation("CoffeeMeetupOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
+  hiddenBy        User?                 @relation("CoffeeMeetupHiddenBy", fields: [hiddenById], references: [id], onDelete: SetNull)
+  requests        CoffeeMeetupRequest[]
+  reports         CoffeeMeetupReport[]
+
+  @@index([status, isHidden, startsAt], map: "idx_coffee_meetups_status_hidden_starts")
+  @@index([cafeId, startsAt], map: "idx_coffee_meetups_cafe_starts")
+  @@index([organizerId, startsAt(sort: Desc)], map: "idx_coffee_meetups_organizer_starts")
+  @@map("coffee_meetups")
+}
+
+model CoffeeMeetupRequest {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  meetupId    String       @map("meetup_id") @db.Uuid
+  requesterId String       @map("requester_id") @db.Uuid
+  message     String?
+  status      String       @default("pending")
+  acceptedAt  DateTime?    @map("accepted_at") @db.Timestamptz(6)
+  rejectedAt  DateTime?    @map("rejected_at") @db.Timestamptz(6)
+  withdrawnAt DateTime?    @map("withdrawn_at") @db.Timestamptz(6)
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  meetup      CoffeeMeetup @relation(fields: [meetupId], references: [id], onDelete: Cascade)
+  requester   User         @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+
+  @@unique([meetupId, requesterId], map: "coffee_meetup_requests_meetup_requester_key")
+  @@index([meetupId, status], map: "idx_coffee_meetup_requests_meetup_status")
+  @@index([requesterId, status], map: "idx_coffee_meetup_requests_requester_status")
+  @@map("coffee_meetup_requests")
+}
+
+model CoffeeMeetupReport {
+  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  meetupId     String       @map("meetup_id") @db.Uuid
+  reporterId   String       @map("reporter_id") @db.Uuid
+  reason       String
+  note         String?
+  resolvedAt   DateTime?    @map("resolved_at") @db.Timestamptz(6)
+  resolvedById String?      @map("resolved_by_id") @db.Uuid
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  meetup       CoffeeMeetup @relation(fields: [meetupId], references: [id], onDelete: Cascade)
+  reporter     User         @relation("CoffeeMeetupReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  resolvedBy   User?        @relation("CoffeeMeetupResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@unique([meetupId, reporterId], map: "coffee_meetup_reports_meetup_reporter_key")
+  @@index([meetupId, createdAt(sort: Desc)], map: "idx_coffee_meetup_reports_meetup_created")
+  @@map("coffee_meetup_reports")
+}
+
 model BlogPost {
   id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   slug           String    @unique
