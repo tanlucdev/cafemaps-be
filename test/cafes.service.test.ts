@@ -6,6 +6,7 @@ import { validateSync } from 'class-validator';
 import { ValidationPipe } from '@nestjs/common';
 import { CafesService } from '../src/cafes/cafes.service';
 import { serializeLocalizedCafe } from '../src/cafes/cafe.mapper';
+import { cafeListSelect } from '../src/cafes/cafes.helpers';
 import { CafeFilterDto } from '../src/cafes/dto/cafe-filter.dto';
 
 function createService(overrides: any = {}) {
@@ -127,30 +128,50 @@ test('findAll keeps legacy district as a one-item exact-match list', async () =>
   ]);
 });
 
-test('findAll passes the district predicate through popular sorting and count', async () => {
-  const calls: any[] = [];
+test('popular filters matched cafes before counting and ranking', async () => {
+  const calls: Prisma.Sql[] = [];
   const { service } = createService({
     prisma: {
-      cafe: {
-        findMany: async (args: any) => {
-          calls.push(args);
-          return [];
-        },
-        count: async (args: any) => {
-          calls.push(args);
-          return 0;
-        },
+      $queryRaw: async (query: Prisma.Sql) => {
+        calls.push(query);
+        return [{ total: 0, id: null }];
       },
     },
   });
 
-  await service.findAll({ districts: ['Quận 1'] });
+  const result = await service.findAll({
+    district: 'Quận 2',
+    districts: ['Quận 1'],
+    search: 'quiet',
+    vibes: ['Quiet'],
+    purposes: ['Work'],
+    tags: ['Outdoor'],
+    priceRange: 'price_50k_100k',
+    chainId: '00000000-0000-0000-0000-000000000001',
+    hours: 'open_24h',
+    openNow: true,
+  });
 
-  const predicate = {
-    OR: [{ district: { in: ['Quận 1'] } }, { districtEn: { in: ['Quận 1'] } }],
-  };
-  assert.deepEqual(calls[0].where.AND, [predicate]);
-  assert.deepEqual(calls[1].where.AND, [predicate]);
+  assert.equal(calls.length, 1);
+  const { sql, values } = calls[0];
+  const matched = sql.split('SELECT totals.total')[0];
+  assert.match(matched, /c\.is_published = true AND c\.is_hidden = false/);
+  assert.match(matched, /c\.district IN \(\?\) OR c\.district_en IN \(\?\)/);
+  assert.equal((matched.match(/ILIKE \?/g) ?? []).length, 6);
+  for (const column of ['vibes', 'purposes', 'tags']) {
+    assert.ok(matched.includes(`c.${column} &&`));
+    assert.ok(matched.includes(`c.${column}_en &&`));
+  }
+  assert.match(matched, /c\.price_min >= 50000 AND c\.price_max <= 100000/);
+  assert.match(matched, /c\.chain_id = \?::uuid/);
+  assert.match(matched, /c\.opening_time = c\.closing_time/);
+  assert.match(matched, /c\.opening_time <= \?::time AND c\.closing_time > \?::time/);
+  assert.match(sql, /COUNT\(\*\)::int AS total FROM matched/);
+  assert.deepEqual(values.slice(0, 14), [
+    'Quận 1', 'Quận 1', ...Array(6).fill('%quiet%'),
+    'Quiet', 'Quiet', 'Work', 'Work', 'Outdoor', 'Outdoor',
+  ]);
+  assert.equal(result.meta.total, 0);
 });
 
 test('findAll passes rating sort to Prisma before pagination', async () => {
@@ -312,58 +333,85 @@ test('opening hours filter contract accepts legacy input, filters both modes, re
   );
 });
 
-test('findAll popular sort uses previous-week votes before all-time and featured', async () => {
+test('popular fetches only page IDs and preserves SQL order and counts', async () => {
+  const rows = [
+    { id: 'weekly', total: 5, weeklyVoteCount: 3, voteCount: 4 },
+    { id: 'all-time', total: 5, weeklyVoteCount: 0, voteCount: 8 },
+    { id: 'a', total: 5, weeklyVoteCount: 0, voteCount: 0 },
+    { id: 'b', total: 5, weeklyVoteCount: 0, voteCount: 0 },
+    { id: 'c', total: 5, weeklyVoteCount: 0, voteCount: 0 },
+  ];
+  const queries: Prisma.Sql[] = [];
+  const findManyCalls: unknown[] = [];
   const { service } = createService({
     prisma: {
-      cafe: {
-        findMany: async () => [
-          {
-            id: 'featured',
-            isFeatured: true,
-            featuredOrder: 1,
-            createdAt: new Date('2026-01-01'),
-            _count: { savedCafes: 9, cafeVotes: 1 },
-          },
-          {
-            id: 'all-time',
-            isFeatured: false,
-            featuredOrder: null,
-            createdAt: new Date('2026-01-02'),
-            _count: { savedCafes: 1, cafeVotes: 8 },
-          },
-          {
-            id: 'weekly',
-            isFeatured: false,
-            featuredOrder: null,
-            createdAt: new Date('2026-01-03'),
-            _count: { savedCafes: 1, cafeVotes: 2 },
-          },
-        ],
-        count: async () => 3,
+      $queryRaw: async (query: Prisma.Sql) => {
+        queries.push(query);
+        const [limit, offset] = query.values.slice(-2) as number[];
+        const page = rows.slice(offset, offset + limit);
+        return page.length ? page : [{ id: null, total: rows.length }];
       },
-      cafeVote: {
-        groupBy: async ({ where }: any) =>
-          where.createdAt
-            ? [{ cafeId: 'weekly', _count: { cafeId: 3 } }]
-            : [
-                { cafeId: 'featured', _count: { cafeId: 1 } },
-                { cafeId: 'all-time', _count: { cafeId: 8 } },
-                { cafeId: 'weekly', _count: { cafeId: 2 } },
-              ],
+      cafe: {
+        findMany: async (args: { where: { id: { in: string[] } } }) => {
+          findManyCalls.push(args);
+          return [...args.where.id.in].reverse().map((id) => ({ id }));
+        },
       },
     },
   });
 
-  const result = await service.findAll({});
+  const member = { id: 'member' };
+  const first = await service.findAll({ limit: 2 }, member);
+  const second = await service.findAll({ sort: 'popular', page: 2, limit: 2 }, member);
+  const empty = await service.findAll({ page: 4, limit: 2 }, member);
 
   assert.deepEqual(
-    result.data.map((cafe: any) => cafe.id),
-    ['weekly', 'all-time', 'featured'],
+    first.data.map(({ id, weeklyVoteCount, voteCount }) => [id, weeklyVoteCount, voteCount]),
+    [['weekly', 3, 4], ['all-time', 0, 8]],
   );
-  assert.deepEqual(
-    result.data.map((cafe: any) => cafe.weeklyVoteCount),
-    [3, 0, 0],
+  assert.deepEqual(second.data.map(({ id }) => id), ['a', 'b']);
+  assert.deepEqual(empty, { data: [], meta: { total: 5, page: 4, limit: 2, totalPages: 3 } });
+  assert.deepEqual(queries.map(({ values }) => values.slice(-2)), [[2, 0], [2, 2], [2, 6]]);
+  assert.match(
+    queries[0].sql.replace(/\s+/g, ' '),
+    /ORDER BY view_count DESC, weekly_vote_count DESC, vote_count DESC, COALESCE\(is_featured, false\) DESC, featured_order ASC NULLS LAST, saved_count DESC, created_at DESC, id ASC LIMIT \? OFFSET \?/,
   );
+  assert.deepEqual(findManyCalls, [['weekly', 'all-time'], ['a', 'b']].map((ids) => ({
+    where: { id: { in: ids }, isPublished: true, isHidden: false },
+    select: cafeListSelect,
+  })));
+});
+
+test('popular guest pages hydrate only the first fifteen cafes and keep teaser totals', async () => {
+  const queryBounds: unknown[][] = [];
+  const detailSizes: number[] = [];
+  const { service } = createService({
+    prisma: {
+      $queryRaw: async ({ values }: Prisma.Sql) => {
+        const [limit, offset] = values.slice(-2) as number[];
+        queryBounds.push([limit, offset]);
+        return limit ? Array.from({ length: limit }, (_, index) => ({
+          id: String(offset + index), total: 27, weeklyVoteCount: 0, voteCount: 0,
+        })) : [{ id: null, total: 27 }];
+      },
+      cafe: {
+        findMany: async ({ where }: { where: { id: { in: string[] } } }) => {
+          detailSizes.push(where.id.in.length);
+          return where.id.in.map((id) => ({ id }));
+        },
+      },
+    },
+  });
+
+  const first = await service.findAll({ page: 1, limit: 9 });
+  const second = await service.findAll({ page: 2, limit: 9 });
+  const third = await service.findAll({ page: 3, limit: 9 });
+
+  assert.deepEqual(queryBounds, [[9, 0], [6, 9], [0, 18]]);
+  assert.deepEqual(detailSizes, [9, 6]);
+  assert.deepEqual([first.data.length, second.data.length, third.data.length], [9, 6, 0]);
+  assert.deepEqual([first, second, third].map(({ meta }) => meta.total), [27, 27, 27]);
+  assert.deepEqual([first, second, third].map(({ meta }) => meta.discovery?.teaserSlots), [0, 3, 9]);
 });
 
 test('findAll localizes cafe fields and searches both languages', async () => {
@@ -404,6 +452,7 @@ test('findAll localizes cafe fields and searches both languages', async () => {
   });
 
   const result = await service.findAll({
+    sort: 'rating',
     locale: 'en',
     search: 'quiet',
     vibes: ['Quiet'],
@@ -466,7 +515,7 @@ test('findAll still returns cafes when vote table is missing', async () => {
     },
   });
 
-  const result = await service.findAll({});
+  const result = await service.findAll({ sort: 'rating' });
 
   assert.deepEqual(result.data, [
     {

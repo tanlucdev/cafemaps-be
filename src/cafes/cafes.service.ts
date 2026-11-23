@@ -9,6 +9,7 @@ import {
   cafeListSelect,
   cafeOrderBy,
   DistanceMode,
+  getVietnamTimeAsDate,
   NearbyCafeRow,
   hoursWhere,
   openNowWhere,
@@ -27,6 +28,8 @@ export class CafesService {
     const { locale, district, districts, search, priceRange, vibes, purposes, tags, hours, chainId } =
       filter;
     const { page = 1, limit = 12, sort, openNow } = filter;
+
+    if (!sort || sort === 'popular') return this.findAllPopular(filter, page, limit, user);
 
     const and: any[] = [];
     const selectedDistricts = districts?.length ? districts : district ? [district] : [];
@@ -69,8 +72,6 @@ export class CafesService {
       ...(and.length && { AND: and }),
     };
 
-    if (!sort || sort === 'popular') return this.findAllPopular(where, locale, page, limit, user);
-
     const [cafes, total] = await Promise.all([
       this.prisma.cafe.findMany({
         where,
@@ -91,42 +92,29 @@ export class CafesService {
   }
 
   private async findAllPopular(
-    where: any,
-    locale: string | undefined,
+    filter: CafeFilterDto,
     page: number,
     limit: number,
     user?: { id: string },
   ) {
-    const [cafes, total] = await Promise.all([
-      this.prisma.cafe.findMany({
-        where,
-        orderBy: cafeOrderBy('popular'),
-        select: cafeListSelect,
-      }),
-      this.prisma.cafe.count({ where }),
-    ]);
-    const { weeklyByCafe, totalByCafe } = await this.getVoteCountMaps(cafes.map((cafe) => cafe.id));
-    const data = cafes
-      .sort(
-        (a, b) =>
-          (b.viewCount ?? 0) - (a.viewCount ?? 0) ||
-          (weeklyByCafe.get(b.id) ?? 0) - (weeklyByCafe.get(a.id) ?? 0) ||
-          (totalByCafe.get(b.id) ?? 0) - (totalByCafe.get(a.id) ?? 0) ||
-          Number(b.isFeatured) - Number(a.isFeatured) ||
-          (a.featuredOrder ?? Number.MAX_SAFE_INTEGER) -
-            (b.featuredOrder ?? Number.MAX_SAFE_INTEGER) ||
-          b._count.savedCafes - a._count.savedCafes ||
-          b.createdAt.getTime() - a.createdAt.getTime(),
-      )
-      .slice((page - 1) * limit, page * limit)
-      .map((cafe) =>
-        this.serializeListCafe(
-          cafe,
-          locale,
-          weeklyByCafe.get(cafe.id) ?? 0,
-          totalByCafe.get(cafe.id) ?? 0,
-        ),
-      );
+    const offset = Math.min((page - 1) * limit, Number.MAX_SAFE_INTEGER);
+    const take = user ? limit : Math.min(limit, Math.max(0, GUEST_VISIBLE_CAFES - offset));
+    const rows = await this.prisma.$queryRaw<
+      { total: number; id: string | null; weeklyVoteCount: number; voteCount: number }[]
+    >(popularPageQuery(filter, offset, take));
+    const total = rows[0]?.total ?? 0;
+    const ids = rows.flatMap(({ id }) => (id === null ? [] : [id]));
+    if (!ids.length) return gateCafePage([], total, page, limit, user);
+
+    const cafes = await this.prisma.cafe.findMany({
+      where: { id: { in: ids }, isPublished: true, isHidden: false },
+      select: cafeListSelect,
+    });
+    const cafesById = new Map(cafes.map((cafe) => [cafe.id, cafe]));
+    const data = rows.flatMap(({ id, weeklyVoteCount, voteCount }) => {
+      const cafe = id === null ? undefined : cafesById.get(id);
+      return cafe ? [this.serializeListCafe(cafe, filter.locale, weeklyVoteCount, voteCount)] : [];
+    });
 
     return gateCafePage(data, total, page, limit, user);
   }
@@ -548,6 +536,20 @@ function discoveryWhere(filter: CafeFilterDto) {
       ${radiusMeters}
     )
   `);
+  addCafeListFilters(parts, filter);
+  if (filter.openNow) {
+    parts.push(Prisma.sql`
+        c.opening_time IS NOT NULL AND c.closing_time IS NOT NULL AND (
+        c.opening_time = c.closing_time OR
+        (c.closing_time > c.opening_time AND timezone('Asia/Ho_Chi_Minh', NOW())::time BETWEEN c.opening_time AND c.closing_time) OR
+        (c.closing_time <= c.opening_time AND (timezone('Asia/Ho_Chi_Minh', NOW())::time >= c.opening_time OR timezone('Asia/Ho_Chi_Minh', NOW())::time < c.closing_time))
+      )
+    `);
+  }
+  return Prisma.join(parts, ' AND ');
+}
+
+function addCafeListFilters(parts: Prisma.Sql[], filter: CafeFilterDto) {
   const districts = filter.districts?.length
     ? filter.districts
     : filter.district
@@ -568,19 +570,57 @@ function discoveryWhere(filter: CafeFilterDto) {
   addDiscoveryArrayFilter(parts, 'vibes', filter.vibes);
   addDiscoveryArrayFilter(parts, 'purposes', filter.purposes);
   addDiscoveryArrayFilter(parts, 'tags', filter.tags);
-  if (filter.priceRange) parts.push(discoveryPriceFilter(filter.priceRange));
+  if (filter.priceRange) {
+    const price = discoveryPriceFilter(filter.priceRange);
+    if (price !== Prisma.empty) parts.push(price);
+  }
   if (filter.hours === 'open_at_7') parts.push(Prisma.sql`c.opening_time = TIME '07:00:00'`);
   if (filter.hours === 'open_24h') parts.push(Prisma.sql`c.opening_time = c.closing_time`);
+}
+
+function popularPageQuery(filter: CafeFilterDto, offset: number, limit: number) {
+  const parts = [Prisma.sql`c.is_published = true AND c.is_hidden = false`];
+  addCafeListFilters(parts, filter);
+  if (filter.chainId) parts.push(Prisma.sql`c.chain_id = ${filter.chainId}::uuid`);
   if (filter.openNow) {
-    parts.push(Prisma.sql`
-        c.opening_time IS NOT NULL AND c.closing_time IS NOT NULL AND (
-        c.opening_time = c.closing_time OR
-        (c.closing_time > c.opening_time AND timezone('Asia/Ho_Chi_Minh', NOW())::time BETWEEN c.opening_time AND c.closing_time) OR
-        (c.closing_time <= c.opening_time AND (timezone('Asia/Ho_Chi_Minh', NOW())::time >= c.opening_time OR timezone('Asia/Ho_Chi_Minh', NOW())::time < c.closing_time))
-      )
-    `);
+    const now = Prisma.sql`${getVietnamTimeAsDate().toISOString().slice(11, 19)}::time`;
+    parts.push(Prisma.sql`(
+      c.opening_time = c.closing_time
+      OR (c.opening_time <= ${now} AND c.closing_time > ${now})
+      OR (c.closing_time <= c.opening_time AND (c.opening_time <= ${now} OR c.closing_time > ${now}))
+    )`);
   }
-  return Prisma.join(parts, ' AND ');
+
+  const { start, end } = CafeVotesService.weekRange();
+  const order = Prisma.sql`
+    view_count DESC, weekly_vote_count DESC, vote_count DESC,
+    COALESCE(is_featured, false) DESC, featured_order ASC NULLS LAST,
+    saved_count DESC, created_at DESC, id ASC
+  `;
+  return Prisma.sql`
+    WITH matched AS (
+      SELECT c.id, c.view_count, c.is_featured, c.featured_order, c.created_at
+      FROM cafes c
+      WHERE ${Prisma.join(parts, ' AND ')}
+    )
+    SELECT totals.total, ranked.id, COALESCE(ranked.weekly_vote_count, 0) AS "weeklyVoteCount",
+      COALESCE(ranked.vote_count, 0) AS "voteCount"
+    FROM (SELECT COUNT(*)::int AS total FROM matched) totals
+    LEFT JOIN (
+      SELECT matched.*, votes.weekly_vote_count, votes.vote_count,
+        (SELECT COUNT(*) FROM saved_cafes s WHERE s.cafe_id = matched.id) AS saved_count
+      FROM matched
+      CROSS JOIN LATERAL (
+        SELECT COUNT(*)::int AS vote_count,
+          (COUNT(*) FILTER (WHERE v.created_at >= ${start} AND v.created_at < ${end}))::int AS weekly_vote_count
+        FROM cafe_votes v
+        WHERE v.cafe_id = matched.id
+      ) votes
+      ORDER BY ${order}
+      LIMIT ${limit} OFFSET ${offset}
+    ) ranked ON true
+    ORDER BY ${order}
+  `;
 }
 
 function addDiscoveryArrayFilter(
