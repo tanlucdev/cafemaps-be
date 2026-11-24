@@ -132,7 +132,7 @@ export class CafesService {
 
   async findSimilar(slug: string, locale?: string) {
     const source = await this.prisma.cafe.findFirst({
-      where: { slug, isPublished: true, isHidden: false },
+      where: { isPublished: true, isHidden: false, ...(this.isUuid(slug) ? { id: slug } : { slug }) },
       select: { id: true, vibes: true, vibesEn: true, purposes: true, purposesEn: true, priceMin: true, priceMax: true },
     });
     if (!source) throw new NotFoundException(`Cafe not found with slug: ${slug}`);
@@ -234,7 +234,7 @@ export class CafesService {
 
   async findBySlug(slug: string, locale?: string) {
     const cafe = await this.prisma.cafe.findFirst({
-      where: { slug, isPublished: true, isHidden: false },
+      where: { isPublished: true, isHidden: false, ...(this.isUuid(slug) ? { id: slug } : { slug }) },
       include: { chain: { select: { id: true, name: true, slug: true } }, _count: { select: { savedCafes: true } } },
     });
 
@@ -251,14 +251,35 @@ export class CafesService {
     );
   }
 
+  private isUuid(value: string) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+  }
+
   async findNearby(
     lat: number,
     lng: number,
     radiusKm: number = 2,
     distanceMode: DistanceMode = 'straight',
     locale?: string,
+    filters: { search?: string; vibes?: string[]; purposes?: string[] } = {},
   ) {
     const radiusMeters = radiusKm * 1000;
+    const conditions = [
+      Prisma.sql`c.is_published = true`,
+      Prisma.sql`c.is_hidden = false`,
+      Prisma.sql`c.location IS NOT NULL`,
+      Prisma.sql`ST_DWithin(c.location, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${radiusMeters})`,
+    ];
+    if (filters.search?.trim()) {
+      const search = `%${filters.search.trim()}%`;
+      conditions.push(Prisma.sql`(c.name ILIKE ${search} OR c.name_en ILIKE ${search} OR c.address ILIKE ${search} OR c.address_en ILIKE ${search})`);
+    }
+    for (const [column, values] of [['vibes', filters.vibes], ['purposes', filters.purposes] ] as const) {
+      if (values?.length) {
+        const array = Prisma.sql`ARRAY[${Prisma.join(values)}]::text[]`;
+        conditions.push(Prisma.sql`(c.${Prisma.raw(column)} && ${array} OR c.${Prisma.raw(`${column}_en`)} && ${array})`);
+      }
+    }
 
     const result = await this.prisma.$queryRaw<NearbyCafeRow[]>`
       SELECT
@@ -288,15 +309,7 @@ export class CafesService {
           2
         ) AS distance_km
       FROM cafes c
-      WHERE
-        c.is_published = true
-        AND c.is_hidden = false
-        AND c.location IS NOT NULL
-        AND ST_DWithin(
-          c.location,
-          ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography,
-          ${radiusMeters}
-        )
+      WHERE ${Prisma.join(conditions, ' AND ')}
       ORDER BY distance_km ASC
       LIMIT 20
     `;
