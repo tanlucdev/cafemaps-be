@@ -17,12 +17,22 @@ import {
 } from './cafes.helpers';
 import { CafeVotesService } from './cafe-votes.service';
 
+const publicCafeWhere = { isPublished: true, isHidden: false };
+
 @Injectable()
 export class CafesService {
   constructor(
     private prisma: PrismaService,
     private routeDistance: RouteDistanceService,
   ) {}
+
+  getSitemapEntries() {
+    return this.prisma.cafe.findMany({
+      where: publicCafeWhere,
+      select: { slug: true, district: true },
+      orderBy: { slug: 'asc' },
+    });
+  }
 
   async findAll(filter: CafeFilterDto, user?: { id: string }) {
     const { locale, district, districts, search, priceRange, vibes, purposes, tags, hours, chainId } =
@@ -234,7 +244,7 @@ export class CafesService {
 
   async findBySlug(slug: string, locale?: string) {
     const cafe = await this.prisma.cafe.findFirst({
-      where: { isPublished: true, isHidden: false, ...(this.isUuid(slug) ? { id: slug } : { slug }) },
+      where: { ...publicCafeWhere, ...(this.isUuid(slug) ? { id: slug } : { slug }) },
       include: { chain: { select: { id: true, name: true, slug: true } }, _count: { select: { savedCafes: true } } },
     });
 

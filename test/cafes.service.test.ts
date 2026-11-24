@@ -32,6 +32,29 @@ function createService(overrides: any = {}) {
   };
 }
 
+test('sitemap returns slugs and districts beyond the guest preview', async () => {
+  const cafes = Array.from({ length: 20 }, (_, index) => ({
+    slug: `cafe-${index}`,
+    district: index % 2 ? 'Quận 1' : null,
+  }));
+  const { service } = createService({
+    prisma: {
+      cafe: {
+        findMany: async (query: Prisma.CafeFindManyArgs) => {
+          assert.deepEqual(query, {
+            where: { isPublished: true, isHidden: false },
+            select: { slug: true, district: true },
+            orderBy: { slug: 'asc' },
+          });
+          return cafes;
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(await service.getSitemapEntries(), cafes);
+});
+
 test('serializeLocalizedCafe dedupes localized list values case-insensitively', () => {
   const cafe = serializeLocalizedCafe(
     {
