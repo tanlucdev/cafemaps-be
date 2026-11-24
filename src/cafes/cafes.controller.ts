@@ -11,7 +11,7 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { JwtService } from '@nestjs/jwt';
 import { Request, Response } from 'express';
 import { CafesService } from './cafes.service';
@@ -38,6 +38,26 @@ export class CafesController {
   @ApiOperation({ summary: 'List cafes with filters and pagination' })
   findAll(@Query() filter: CafeFilterDto, @CurrentUser() user?: { id: string }) {
     return this.cafesService.findAll(filter, user);
+  }
+
+  @Get('sitemap/entries')
+  @Header('Cache-Control', 'public, max-age=300')
+  @ApiOperation({ summary: 'List slugs and districts of public cafes for the sitemap' })
+  @ApiOkResponse({
+    schema: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['slug', 'district'],
+        properties: {
+          slug: { type: 'string' },
+          district: { type: 'string', nullable: true },
+        },
+      },
+    },
+  })
+  getSitemapEntries() {
+    return this.cafesService.getSitemapEntries();
   }
 
   @Get('nearby/discovery')
