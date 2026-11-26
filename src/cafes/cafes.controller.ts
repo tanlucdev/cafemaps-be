@@ -209,7 +209,7 @@ export class CafesController {
   @Header('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
   @ApiOperation({
     summary: 'Get cafe details by slug',
-    description: 'Includes imageSourceUsernames, an array of Instagram usernames supplying gallery images. Empty when no source is recorded. Cafe-level sources, not per-image authorship.',
+    description: 'Includes imageSourceUsernames for gallery credits and experienceUrls for original posts. Each array is empty when no sources are recorded.',
   })
   findOne(@Param('slug') slug: string, @Query('locale') locale?: string) {
     return this.cafesService.findBySlug(slug, locale);

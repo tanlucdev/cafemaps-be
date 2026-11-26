@@ -32,6 +32,22 @@ function createService(overrides: any = {}) {
   };
 }
 
+test('public cafe detail includes the original post URLs', async () => {
+  const experienceUrls = ['https://www.instagram.com/p/source/'];
+  const { service } = createService({
+    prisma: {
+      cafe: {
+        findFirst: async () => ({ id: 'source-cafe', experienceUrls }),
+      },
+    },
+  });
+
+  const cafe = await service.findBySlug('source-cafe');
+  assert.ok('experienceUrls' in cafe);
+  assert.deepEqual(cafe.experienceUrls, experienceUrls);
+  assert.equal('experienceUrls' in cafeListSelect, false);
+});
+
 test('sitemap returns slugs and districts beyond the guest preview', async () => {
   const cafes = Array.from({ length: 20 }, (_, index) => ({
     slug: `cafe-${index}`,

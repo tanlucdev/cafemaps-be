@@ -94,6 +94,7 @@ model Cafe {
   menuImage         String?                   @map("menu_image")
   menuImages        String[]                  @default([]) @map("menu_images")
   imageSourceUsernames String[]               @default([]) @map("image_source_usernames")
+  experienceUrls    String[]                  @default([]) @map("experience_urls")
   instagramUrl      String?                   @map("instagram_url")
   isFeatured        Boolean?                  @default(false) @map("is_featured")
   featuredOrder     Int?                      @map("featured_order")
