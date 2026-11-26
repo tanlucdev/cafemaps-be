@@ -101,11 +101,12 @@ export function cafeOrderBy(sort: CafeFilterDto['sort']): any[] {
       { isFeatured: 'desc' },
       { featuredOrder: { sort: 'asc', nulls: 'last' } },
       { createdAt: 'desc' },
+      { id: 'asc' },
     ];
   }
 
   if (sort === 'newest') {
-    return [{ createdAt: 'desc' }];
+    return [{ createdAt: 'desc' }, { id: 'asc' }];
   }
 
   return [

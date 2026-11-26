@@ -28,12 +28,12 @@ function createService(overrides: any = {}) {
 test('getCollections merges empty folders and folders used by saved cafes', async () => {
   const { service } = createService({
     prisma: {
-      savedCollection: {
-        findMany: async () => [{ name: 'Dates', createdAt: new Date('2026-01-01') }],
-      },
-      savedCafe: {
-        findMany: async () => [{ collectionName: 'Work' }, { collectionName: null }],
-      },
+      $queryRaw: async () => [
+        { name: 'Dates', createdAt: new Date('2026-01-01') },
+        { name: 'WORK', createdAt: new Date('2026-01-01') },
+        { name: ' Work ', createdAt: null },
+        { name: 'work', createdAt: null },
+      ],
     },
   });
 

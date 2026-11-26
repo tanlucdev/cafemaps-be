@@ -82,17 +82,15 @@ export class CafesService {
       ...(and.length && { AND: and }),
     };
 
+    const skip = (page - 1) * limit;
+    const take = user ? limit : Math.min(limit, Math.max(0, GUEST_VISIBLE_CAFES - skip));
     const [cafes, total] = await Promise.all([
-      this.prisma.cafe.findMany({
-        where,
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: cafeOrderBy(sort),
-        select: cafeListSelect,
-      }),
+      take
+        ? this.prisma.cafe.findMany({ where, skip, take, orderBy: cafeOrderBy(sort), select: cafeListSelect })
+        : [],
       this.prisma.cafe.count({ where }),
     ]);
-    const { totalByCafe } = await this.getVoteCountMaps(cafes.map((cafe) => cafe.id));
+    const { totalByCafe } = await this.getVoteCountMaps(cafes.map((cafe) => cafe.id), false);
 
     const data = cafes.map((cafe) =>
       this.serializeListCafe(cafe, locale, 0, totalByCafe.get(cafe.id) ?? 0),
@@ -147,35 +145,50 @@ export class CafesService {
     });
     if (!source) throw new NotFoundException(`Cafe not found with slug: ${slug}`);
 
-    const normalize = (values: string[]) => [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))];
-    const sourceVibes = normalize([...(source.vibes ?? []), ...(source.vibesEn ?? [])]);
-    const sourcePurposes = normalize([...(source.purposes ?? []), ...(source.purposesEn ?? [])]);
-    const candidates = await this.prisma.cafe.findMany({
-      where: { isPublished: true, isHidden: false, id: { not: source.id }, OR: [{ vibes: { hasSome: source.vibes } }, { vibesEn: { hasSome: source.vibesEn } }] },
-      select: { ...cafeListSelect, vibes: true, vibesEn: true, purposes: true, purposesEn: true, priceMin: true, priceMax: true },
-      orderBy: [{ viewCount: 'desc' }, { id: 'asc' }],
+    const sourceVibes = normalizeSimilarTags([...(source.vibes ?? []), ...(source.vibesEn ?? [])]);
+    const sourcePurposes = normalizeSimilarTags([...(source.purposes ?? []), ...(source.purposesEn ?? [])]);
+    const ranked = await this.prisma.$queryRaw<{ id: string }[]>`
+      WITH scored AS (
+        SELECT c.id, c.chain_id,
+          ${similarTagRatio(Prisma.sql`c.vibes || c.vibes_en`, sourceVibes)} AS vibe_score,
+          ${similarTagRatio(Prisma.sql`c.purposes || c.purposes_en`, sourcePurposes)} AS purpose_score,
+          COALESCE(
+            GREATEST(c.price_min, ${source.priceMin}::int) <= LEAST(c.price_max, ${source.priceMax}::int)
+              AND c.price_min IS NOT NULL AND c.price_max IS NOT NULL
+              AND ${source.priceMin}::int IS NOT NULL AND ${source.priceMax}::int IS NOT NULL,
+            false
+          ) AS price_overlap
+        FROM cafes c
+        WHERE c.is_published AND NOT c.is_hidden AND c.id <> ${source.id}::uuid
+          AND (c.vibes && ${source.vibes}::text[] OR c.vibes_en && ${source.vibesEn}::text[])
+      ), ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY chain_id, CASE WHEN chain_id IS NULL THEN id END
+          ORDER BY vibe_score DESC, purpose_score DESC, price_overlap DESC, id ASC
+        ) AS chain_rank
+        FROM scored
+      )
+      SELECT id FROM ranked WHERE chain_rank = 1
+      ORDER BY vibe_score DESC, purpose_score DESC, price_overlap DESC, id ASC
+      LIMIT 4
+    `;
+
+    if (!ranked.length) return { data: [] };
+    const cafes = await this.prisma.cafe.findMany({
+      where: { ...publicCafeWhere, id: { in: ranked.map(({ id }) => id) } },
+      select: cafeListSelect,
     });
-    const ratio = (left: string[], right: string[]) => {
-      const union = new Set([...left, ...right]);
-      return union.size ? left.filter((value) => right.includes(value)).length / union.size : 0;
+    const cafesById = new Map(cafes.map((cafe) => [cafe.id, cafe]));
+    const fallback = locale === 'en' ? 'similar atmosphere' : 'không gian tương đồng';
+    return {
+      data: ranked.flatMap(({ id }) => {
+        const cafe = cafesById.get(id);
+        if (!cafe) return [];
+        const matchedVibe = normalizeSimilarTags([...cafe.vibes, ...cafe.vibesEn])
+          .find((value) => sourceVibes.includes(value));
+        return [{ cafe: this.serializeListCafe(cafe), matchedVibe: matchedVibe ?? fallback }];
+      }),
     };
-    const overlapVibe = (candidate: any) => normalize([...(candidate.vibes ?? []), ...(candidate.vibesEn ?? [])]).filter((value) => sourceVibes.includes(value));
-    const ranked = candidates.map((candidate: any) => {
-      const vibes = normalize([...(candidate.vibes ?? []), ...(candidate.vibesEn ?? [])]);
-      const purposes = normalize([...(candidate.purposes ?? []), ...(candidate.purposesEn ?? [])]);
-      const priceOverlap = source.priceMin != null && source.priceMax != null && candidate.priceMin != null && candidate.priceMax != null && Math.max(source.priceMin, candidate.priceMin) <= Math.min(source.priceMax, candidate.priceMax) ? 1 : 0;
-      return { candidate, matched: overlapVibe(candidate), score: [ratio(sourceVibes, vibes), ratio(sourcePurposes, purposes), priceOverlap] };
-    }).sort((a, b) => b.score[0] - a.score[0] || b.score[1] - a.score[1] || b.score[2] - a.score[2] || a.candidate.id.localeCompare(b.candidate.id));
-    const selected: typeof ranked = [];
-    const chains = new Set<string>();
-    for (const item of ranked) {
-      const chainId = item.candidate.chain?.id;
-      if (chainId && chains.has(chainId)) continue;
-      selected.push(item);
-      if (chainId) chains.add(chainId);
-      if (selected.length === 4) break;
-    }
-    return { data: selected.map(({ candidate, matched }) => ({ cafe: this.serializeListCafe(candidate), matchedVibe: matched[0] ?? (locale === 'en' ? 'similar atmosphere' : 'không gian tương đồng') })) };
   }
 
   async trackView(cafeId: string, visitorKey: string) {
@@ -214,17 +227,19 @@ export class CafesService {
     }
   }
 
-  private async getVoteCountMaps(cafeIds: string[]) {
+  private async getVoteCountMaps(cafeIds: string[], includeWeekly = true) {
     if (!cafeIds.length)
       return { weeklyByCafe: new Map<string, number>(), totalByCafe: new Map<string, number>() };
     const { start, end } = CafeVotesService.weekRange();
     try {
       const [weekly, total] = await Promise.all([
-        this.prisma.cafeVote.groupBy({
-          by: ['cafeId'],
-          where: { createdAt: { gte: start, lt: end }, cafeId: { in: cafeIds } },
-          _count: { cafeId: true },
-        }),
+        includeWeekly
+          ? this.prisma.cafeVote.groupBy({
+              by: ['cafeId'],
+              where: { createdAt: { gte: start, lt: end }, cafeId: { in: cafeIds } },
+              _count: { cafeId: true },
+            })
+          : [],
         this.prisma.cafeVote.groupBy({
           by: ['cafeId'],
           where: { cafeId: { in: cafeIds } },
@@ -233,7 +248,7 @@ export class CafesService {
       ]);
 
       return {
-        weeklyByCafe: new Map(weekly.map((row) => [row.cafeId, row._count.cafeId])),
+        weeklyByCafe: new Map(weekly.map((row) => [row.cafeId, row._count.cafeId] as const)),
         totalByCafe: new Map(total.map((row) => [row.cafeId, row._count.cafeId])),
       };
     } catch {
@@ -426,12 +441,12 @@ export class CafesService {
   }
 
   async getDistricts(locale?: string) {
-    const result = await this.prisma.cafe.findMany({
-      where: { isPublished: true, isHidden: false, district: { not: null } },
-      select: { district: true, districtEn: true },
-      distinct: ['district'],
-      orderBy: { district: 'asc' },
-    });
+    const result = await this.prisma.$queryRaw<{ district: string; districtEn: string | null }[]>`
+      SELECT DISTINCT ON (district) district, district_en AS "districtEn"
+      FROM cafes
+      WHERE is_published AND NOT is_hidden AND district IS NOT NULL
+      ORDER BY district ASC, (NULLIF(district_en, '') IS NULL) ASC, id ASC
+    `;
 
     return result
       .map((district) => serializeLocalizedCafe(district, locale).district)
@@ -500,6 +515,29 @@ export class CafesService {
 
     return cafes.map((cafe) => serializeLocalizedCafe(cafe, locale));
   }
+}
+
+function normalizeSimilarTags(values: string[]) {
+  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))];
+}
+
+// ECMAScript trim whitespace. ICU lowercases Vietnamese and keeps its accents.
+const similarTrimChars = '\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680'
+  + '\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a'
+  + '\u2028\u2029\u202f\u205f\u3000\ufeff';
+
+function similarTagRatio(values: Prisma.Sql, source: string[]) {
+  return Prisma.sql`(
+    SELECT COALESCE(matched::float8 / NULLIF(cardinality(${source}::text[]) + size - matched, 0), 0)
+    FROM (
+      SELECT COUNT(*) AS size, COUNT(*) FILTER (WHERE tag = ANY(${source}::text[])) AS matched
+      FROM (
+        SELECT DISTINCT lower(btrim(value, ${similarTrimChars}) COLLATE "und-x-icu") AS tag
+        FROM unnest(${values}) AS value
+      ) normalized
+      WHERE tag <> ''
+    ) counts
+  )`;
 }
 
 // ponytail: fifteen guest previews are current product policy; promote this to plan configuration only for multiple access tiers.

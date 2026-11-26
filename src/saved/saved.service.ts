@@ -106,26 +106,35 @@ export class SavedService {
   }
 
   async getCollections(userId: string) {
-    const [created, used] = await Promise.all([
-      this.prisma.savedCollection.findMany({
-        where: { userId },
-        select: { name: true, createdAt: true },
-        orderBy: { name: 'asc' },
-      }),
-      this.prisma.savedCafe.findMany({
-        where: { userId },
-        select: { collectionName: true },
-        distinct: ['collectionName'],
-      }),
-    ]);
+    const collections = await this.prisma.$queryRaw<{ name: string; createdAt: Date | null }[]>`
+      SELECT name, "createdAt"
+      FROM (
+        SELECT name, created_at AS "createdAt"
+        FROM saved_collections
+        WHERE user_id = ${userId}::uuid
+        UNION ALL
+        SELECT collection_name, NULL
+        FROM saved_cafes
+        WHERE user_id = ${userId}::uuid AND collection_name IS NOT NULL
+        GROUP BY collection_name
+      ) names
+      ORDER BY ("createdAt" IS NOT NULL) DESC, name ASC
+    `;
 
     const names = new Map<string, { name: string; createdAt?: Date }>();
-    for (const collection of created) {
-      names.set(collection.name.toLowerCase(), collection);
-    }
-    for (const item of used) {
-      const name = item.collectionName?.trim();
-      if (name) names.set(name.toLowerCase(), { name });
+    const usedNames = new Set<string>();
+    for (const { name: original, createdAt } of collections) {
+      if (createdAt) {
+        const key = original.toLowerCase();
+        if (!names.has(key)) names.set(key, { name: original, createdAt });
+        continue;
+      }
+
+      const name = original.trim();
+      const key = name.toLowerCase();
+      if (!name || usedNames.has(key)) continue;
+      usedNames.add(key);
+      names.set(key, { name });
     }
 
     return Array.from(names.values()).sort((a, b) => a.name.localeCompare(b.name));

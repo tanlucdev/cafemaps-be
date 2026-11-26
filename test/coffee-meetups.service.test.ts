@@ -99,6 +99,11 @@ function createPrisma() {
         return { count: reports.length };
       },
     },
+    $queryRaw: async (_sql: TemplateStringsArray, ids: string[]) => ids.map((meetupId) => ({
+      meetupId,
+      accepted: requests.filter((request) => request.meetupId === meetupId && request.status === 'accepted').length,
+      pending: requests.filter((request) => request.meetupId === meetupId && request.status === 'pending').length,
+    })),
     $transaction: async (arg: any) => Array.isArray(arg) ? Promise.all(arg) : arg(prisma),
   };
   return { prisma, meetups, requests, reports };

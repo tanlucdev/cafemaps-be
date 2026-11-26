@@ -4,6 +4,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { adminCounts, adminUserSelect, cafeSelect, counts, dateWhere, normalizeGoogleMapsUrl, normalizePurpose, pageValue, purposeValues, searchWhere, seats, serializeAdminMeetup, serializeMeetup, statusData, userSelect } from './coffee-meetups.helpers';
 import { AdminCoffeeMeetupListDto, CoffeeMeetupListDto, CoffeeMeetupRequestDto, CreateCoffeeMeetupDto, ReportCoffeeMeetupDto, UpdateCoffeeMeetupDto } from './dto/coffee-meetup.dto';
 
+type NearbyMeetupPage = {
+  distances: Map<string, number>;
+  total: number;
+};
+
 @Injectable()
 export class CoffeeMeetupsService {
   constructor(private prisma: PrismaService) {}
@@ -14,33 +19,71 @@ export class CoffeeMeetupsService {
     if (dto.nearMe && (!Number.isFinite(dto.lat) || !Number.isFinite(dto.lng))) {
       throw new BadRequestException('Valid latitude and longitude are required for nearMe');
     }
-    const where: any = {
-      isHidden: false,
-      status: dto.available ? 'open' : { in: ['open', 'full'] },
-      endsAt: { gt: new Date() },
-      ...(dto.cafeId ? { cafeId: dto.cafeId } : {}),
-      ...(dto.purpose ? { purpose: { in: purposeValues(dto.purpose), mode: 'insensitive' } } : {}),
-      ...(dto.area ? { cafe: { district: { contains: dto.area, mode: 'insensitive' } } } : {}),
-      ...dateWhere(dto.date),
-      ...searchWhere(dto.search),
-    };
-    if (!dto.nearMe) return this.page(where, page, limit);
+    const status = dto.available ? ['open'] : ['open', 'full'];
+    const now = new Date();
+    const date = dateWhere(dto.date);
+    const purposes = purposeValues(dto.purpose);
 
-    const candidates = await this.prisma.coffeeMeetup.findMany({ where: { ...where, cafeId: { not: null } }, select: { id: true } });
-    if (!candidates.length) return { data: [], meta: { total: 0, page, limit, totalPages: 0 } };
+    if (!dto.nearMe) {
+      return this.page({
+        isHidden: false,
+        status: { in: status },
+        endsAt: { gt: now },
+        ...(dto.cafeId ? { cafeId: dto.cafeId } : {}),
+        ...(purposes.length ? { purpose: { in: purposes, mode: 'insensitive' } } : {}),
+        ...(dto.area ? { cafe: { district: { contains: dto.area, mode: 'insensitive' } } } : {}),
+        ...date,
+        ...searchWhere(dto.search),
+      }, page, limit);
+    }
+
     const radiusMeters = (dto.radiusKm ?? 2) * 1000;
-    const nearby = await this.prisma.$queryRaw<Array<{ id: string; distanceKm: number }>>`
-      SELECT m.id, ROUND((ST_Distance(c.location, ST_SetSRID(ST_MakePoint(${dto.lng}, ${dto.lat}), 4326)::geography) / 1000)::numeric, 2)::float AS "distanceKm"
-      FROM coffee_meetups m JOIN cafes c ON c.id = m.cafe_id
-      WHERE m.id IN (${Prisma.join(candidates.map((candidate) => candidate.id))})
-        AND c.location IS NOT NULL
-        AND ST_DWithin(c.location, ST_SetSRID(ST_MakePoint(${dto.lng}, ${dto.lat}), 4326)::geography, ${radiusMeters})
-      ORDER BY "distanceKm" ASC, m.starts_at ASC, m.id ASC
+    const search = dto.search?.trim();
+    const searchPattern = search && `%${search}%`;
+    const purposeFilter = purposes.length
+      ? Prisma.sql`AND LOWER(m.purpose) IN (
+          ${Prisma.join(purposes.map((purpose) => Prisma.sql`LOWER(${purpose})`))}
+        )`
+      : Prisma.empty;
+    const point = Prisma.sql`ST_SetSRID(ST_MakePoint(${dto.lng}, ${dto.lat}), 4326)::geography`;
+    // The nearby path has always used the radius in place of cafeId.
+    const nearby = await this.prisma.$queryRaw<{
+      total: number; id: string | null; distanceKm: number | null;
+    }[]>`
+      WITH matched AS (
+        SELECT m.id, m.starts_at, c.location
+        FROM coffee_meetups m JOIN cafes c ON c.id = m.cafe_id
+        WHERE NOT m.is_hidden AND m.status = ANY(${status}::text[]) AND m.ends_at > ${now}
+          AND c.location IS NOT NULL AND ST_DWithin(c.location, ${point}, ${radiusMeters})
+          ${purposeFilter}
+          ${dto.area ? Prisma.sql`AND c.district ILIKE ${`%${dto.area}%`}` : Prisma.empty}
+          ${date.startsAt ? Prisma.sql`AND m.starts_at >= ${date.startsAt.gte} AND m.starts_at < ${date.startsAt.lt}` : Prisma.empty}
+          ${searchPattern ? Prisma.sql`AND (
+            m.title ILIKE ${searchPattern}
+            OR m.external_place_name ILIKE ${searchPattern}
+            OR c.name ILIKE ${searchPattern}
+          )` : Prisma.empty}
+      ), page AS (
+        SELECT id, starts_at, ROUND((ST_Distance(location, ${point}) / 1000)::numeric, 2)::float8 AS distance_km
+        FROM matched
+        ORDER BY distance_km ASC, starts_at ASC, id ASC
+        OFFSET ${Math.min((page - 1) * limit, Number.MAX_SAFE_INTEGER)} LIMIT ${limit}
+      )
+      SELECT totals.total, page.id, page.distance_km AS "distanceKm"
+      FROM (SELECT COUNT(*)::int AS total FROM matched) totals
+      LEFT JOIN page ON true
+      ORDER BY page.distance_km ASC, page.starts_at ASC, page.id ASC
     `;
-    const total = nearby.length;
-    const ids = nearby.slice((page - 1) * limit, page * limit).map((row) => row.id);
-    const distanceById = new Map(nearby.map((row) => [row.id, row.distanceKm]));
-    return this.page({ id: { in: ids } }, page, limit, distanceById, ids, total);
+    const total = nearby[0]?.total ?? 0;
+    const distances = new Map(nearby.flatMap(({ id, distanceKm }) =>
+      id === null || distanceKm === null ? [] : [[id, distanceKm] as const],
+    ));
+    return this.page(
+      { isHidden: false, id: { in: [...distances.keys()] } },
+      page,
+      limit,
+      { distances, total },
+    );
   }
 
   async detail(id: string, viewerId?: string | null) {
@@ -126,7 +169,7 @@ export class CoffeeMeetupsService {
 
   async adminList(dto: AdminCoffeeMeetupListDto) {
     const page = pageValue(dto.page, 1); const limit = pageValue(dto.limit, 12, 100);
-    return this.page({ ...(dto.status ? { status: dto.status } : {}), ...(dto.hidden !== undefined ? { isHidden: dto.hidden } : {}), ...(dto.reported ? { reports: { some: { resolvedAt: null } } } : {}), ...searchWhere(dto.search, true) }, page, limit, undefined, undefined, undefined, true);
+    return this.page({ ...(dto.status ? { status: dto.status } : {}), ...(dto.hidden !== undefined ? { isHidden: dto.hidden } : {}), ...(dto.reported ? { reports: { some: { resolvedAt: null } } } : {}), ...searchWhere(dto.search, true) }, page, limit, undefined, true);
   }
 
   async adminDetail(id: string) {
@@ -142,15 +185,50 @@ export class CoffeeMeetupsService {
     return serializeAdminMeetup(meetup);
   }
 
-  private async page(where: any, page: number, limit: number, distances?: Map<string, number>, orderedIds?: string[], totalOverride?: number, admin = false) {
+  private async page(
+    where: Prisma.CoffeeMeetupWhereInput,
+    page: number,
+    limit: number,
+    nearby?: NearbyMeetupPage,
+    admin = false,
+  ) {
     const [rows, total] = await Promise.all([
-      this.prisma.coffeeMeetup.findMany({ where, ...(orderedIds ? {} : { skip: (page - 1) * limit, take: limit }), orderBy: orderedIds ? undefined : [{ startsAt: 'asc' }, { id: 'asc' }], include: { cafe: { select: cafeSelect }, organizer: { select: admin ? adminUserSelect : userSelect }, requests: { select: { status: true } }, _count: { select: admin ? adminCounts : counts } } }),
-      totalOverride ?? this.prisma.coffeeMeetup.count({ where: orderedIds ? { id: { in: orderedIds } } : where }),
+      nearby?.distances.size === 0 ? [] : this.prisma.coffeeMeetup.findMany({
+        where,
+        ...(nearby ? {} : { skip: (page - 1) * limit, take: limit, orderBy: [{ startsAt: 'asc' }, { id: 'asc' }] }),
+        include: {
+          cafe: { select: cafeSelect },
+          organizer: { select: admin ? adminUserSelect : userSelect },
+          ...(admin ? { _count: { select: { reports: true } } } : {}),
+        },
+      }),
+      nearby?.total ?? this.prisma.coffeeMeetup.count({ where }),
     ]);
-    const order = orderedIds ? new Map(orderedIds.map((id, index) => [id, index])) : null;
-    const data = rows.sort((a, b) => (order ? (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0) : 0)).map((meetup) => {
-      const result = admin ? serializeAdminMeetup(meetup) : serializeMeetup(meetup);
-      const distanceKm = distances?.get(meetup.id);
+    const requestCounts = rows.length ? await this.prisma.$queryRaw<{
+      meetupId: string; accepted: number; pending: number;
+    }[]>`
+      SELECT meetup_id AS "meetupId",
+        (COUNT(*) FILTER (WHERE status = 'accepted'))::int AS accepted,
+        (COUNT(*) FILTER (WHERE status = 'pending'))::int AS pending
+      FROM coffee_meetup_requests
+      WHERE meetup_id = ANY(${rows.map(({ id }) => id)}::uuid[])
+        AND status IN ('accepted', 'pending')
+      GROUP BY meetup_id
+    ` : [];
+    const countsById = new Map(requestCounts.map((row) => [row.meetupId, row]));
+    if (nearby) {
+      const order = new Map(Array.from(nearby.distances.keys(), (id, index) => [id, index]));
+      rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+    }
+    const data = rows.map((meetup) => {
+      const counted = countsById.get(meetup.id);
+      const withCounts = {
+        ...meetup,
+        _count: { ...meetup._count, requests: counted?.accepted ?? 0 },
+        pendingCount: counted?.pending ?? 0,
+      };
+      const result = admin ? serializeAdminMeetup(withCounts) : serializeMeetup(withCounts);
+      const distanceKm = nearby?.distances.get(meetup.id);
       return distanceKm == null || !result.cafe ? result : { ...result, distanceKm, distanceMode: 'straight' as const, cafe: { ...result.cafe, distanceKm, distanceMode: 'straight' as const } };
     });
     return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };

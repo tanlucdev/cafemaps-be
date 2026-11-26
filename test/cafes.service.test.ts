@@ -142,7 +142,7 @@ test('findAll uses districts before legacy district for exact matching, count, s
   assert.deepEqual(countCalls[0], { where });
   assert.equal(findManyCalls[0].skip, 1);
   assert.equal(findManyCalls[0].take, 1);
-  assert.deepEqual(findManyCalls[0].orderBy, [{ createdAt: 'desc' }]);
+  assert.deepEqual(findManyCalls[0].orderBy, [{ createdAt: 'desc' }, { id: 'asc' }]);
   assert.deepEqual(result.meta, { total: 3, page: 2, limit: 1, totalPages: 3 });
 });
 
@@ -235,7 +235,13 @@ test('findAll passes rating sort to Prisma before pagination', async () => {
 
   assert.equal(findManyArgs.skip, 9);
   assert.equal(findManyArgs.take, 9);
-  assert.deepEqual(findManyArgs.orderBy[0], { rating: { sort: 'desc', nulls: 'last' } });
+  assert.deepEqual(findManyArgs.orderBy, [
+    { rating: { sort: 'desc', nulls: 'last' } },
+    { isFeatured: 'desc' },
+    { featuredOrder: { sort: 'asc', nulls: 'last' } },
+    { createdAt: 'desc' },
+    { id: 'asc' },
+  ]);
   assert.equal(findManyArgs.select.rating, true);
   assert.deepEqual(result.data, [
     { id: 'cafe-1', savedCount: 3, viewCount: 0, voteCount: 4, weeklyVoteCount: 0 },
@@ -275,12 +281,23 @@ test('guest list allows fifteen filtered cafes before locking later results', as
     id: String(index),
     _count: { savedCafes: 0 },
   }));
+  const detailLimits: number[] = [];
+  const voteIds: string[][] = [];
   const { service } = createService({
     prisma: {
       cafe: {
-        findMany: async ({ skip = 0, take = cafes.length }: { skip?: number; take?: number }) =>
-          cafes.slice(skip, skip + take),
+        findMany: async ({ skip, take }: { skip: number; take: number }) => {
+          detailLimits.push(take);
+          return cafes.slice(skip, skip + take);
+        },
         count: async () => cafes.length,
+      },
+      cafeVote: {
+        groupBy: async ({ where }: any) => {
+          assert.equal(where.createdAt, undefined);
+          voteIds.push(where.cafeId.in);
+          return [];
+        },
       },
     },
   });
@@ -289,6 +306,8 @@ test('guest list allows fifteen filtered cafes before locking later results', as
   const secondPage = await service.findAll({ search: 'coffee', sort: 'rating', page: 2, limit: 9 });
   const thirdPage = await service.findAll({ search: 'coffee', sort: 'rating', page: 3, limit: 9 });
 
+  assert.deepEqual(detailLimits, [9, 6]);
+  assert.deepEqual(voteIds, [cafes.slice(0, 9), cafes.slice(9, 15)].map((rows) => rows.map(({ id }) => id)));
   assert.equal(firstPage.data.length, 9);
   assert.deepEqual(firstPage.meta.discovery, {
     displayTotal: 27,

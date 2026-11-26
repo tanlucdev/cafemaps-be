@@ -64,7 +64,9 @@ export const counts = { requests: { where: { status: 'accepted' }  } } as const;
 export const adminCounts = { ...counts, reports: true } as const;
 export const displayName = (user: any) => user?.displayName?.trim() || 'Cafe Maps user';
 export const acceptedRequestCount = (meetup: any) => meetup._count?.requests ?? (Array.isArray(meetup.requests) ? meetup.requests.filter((request: any) => request.status === 'accepted').length : 0);
-export const pendingRequestCount = (meetup: any) => Array.isArray(meetup.requests) ? meetup.requests.filter((request: any) => request.status === 'pending').length : 0;
+export const pendingRequestCount = (meetup: any) => meetup.pendingCount ?? (
+  Array.isArray(meetup.requests) ? meetup.requests.filter((request: any) => request.status === 'pending').length : 0
+);
 export const seats = (meetup: any) => 1 + acceptedRequestCount(meetup);
 
 export const serializeMeetup = (meetup: any, detail = false, viewerId?: string | null, admin = false, includeParticipants = detail) => {
