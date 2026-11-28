@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Request, Response } from 'express';
+import { CafeDetailAccessService } from '../cafe-detail-access/cafe-detail-access.service';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -31,21 +32,32 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly authCookieService: AuthCookieService,
+    private readonly detailAccess: CafeDetailAccessService,
     private readonly googleOAuthService: GoogleOAuthService,
   ) {}
 
   @Post('register')
   @ApiOperation({ summary: 'Register a new account' })
-  async register(@Body() dto: RegisterDto, @Res({ passthrough: true }) res: Response) {
+  async register(
+    @Body() dto: RegisterDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const result = await this.authService.register(dto);
+    await this.detailAccess.mergeOnLogin(this.detailAccess.readBrowser(req.headers.cookie), result.user.id);
     this.authCookieService.setJwtCookie(res, result.token);
     return result;
   }
 
   @Post('login')
   @ApiOperation({ summary: 'Login and receive a JWT token' })
-  async login(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response) {
+  async login(
+    @Body() dto: LoginDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const result = await this.authService.login(dto);
+    await this.detailAccess.mergeOnLogin(this.detailAccess.readBrowser(req.headers.cookie), result.user.id);
     this.authCookieService.setJwtCookie(res, result.token);
     return result;
   }
@@ -77,6 +89,7 @@ export class AuthController {
     }
 
     const result = await this.googleOAuthService.finish(code);
+    await this.detailAccess.mergeOnLogin(this.detailAccess.readBrowser(req.headers.cookie), result.user.id);
     this.authCookieService.setJwtCookie(res, result.token);
     return res.redirect(normalizeReturnUrl(saved.returnUrl));
   }

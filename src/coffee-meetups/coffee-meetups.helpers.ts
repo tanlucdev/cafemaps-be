@@ -59,7 +59,7 @@ export const searchWhere = (search?: string, admin = false) => {
 
 export const userSelect = { id: true, displayName: true } as const;
 export const adminUserSelect = { ...userSelect, email: true } as const;
-export const cafeSelect = { id: true, name: true, slug: true, address: true, district: true, coverImage: true, images: true } as const;
+export const cafeSelect = { id: true, name: true, slug: true, address: true, district: true, coverImage: true } as const;
 export const counts = { requests: { where: { status: 'accepted' }  } } as const;
 export const adminCounts = { ...counts, reports: true } as const;
 export const displayName = (user: any) => user?.displayName?.trim() || 'Cafe Maps user';

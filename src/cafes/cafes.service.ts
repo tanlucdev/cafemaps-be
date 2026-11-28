@@ -34,12 +34,12 @@ export class CafesService {
     });
   }
 
-  async findAll(filter: CafeFilterDto, user?: { id: string }) {
+  async findAll(filter: CafeFilterDto) {
     const { locale, district, districts, search, priceRange, vibes, purposes, tags, hours, chainId } =
       filter;
     const { page = 1, limit = 12, sort, openNow } = filter;
 
-    if (!sort || sort === 'popular') return this.findAllPopular(filter, page, limit, user);
+    if (!sort || sort === 'popular') return this.findAllPopular(filter, page, limit);
 
     const and: any[] = [];
     const selectedDistricts = districts?.length ? districts : district ? [district] : [];
@@ -98,23 +98,21 @@ export class CafesService {
       this.serializeListCafe(cafe, locale, 0, totalByCafe.get(cafe.id) ?? 0),
     );
 
-    return gateCafePage(data, total, page, limit, user);
+    return cafePage(data, total, page, limit);
   }
 
   private async findAllPopular(
     filter: CafeFilterDto,
     page: number,
     limit: number,
-    user?: { id: string },
   ) {
     const offset = Math.min((page - 1) * limit, Number.MAX_SAFE_INTEGER);
-    const take = user ? limit : Math.min(limit, Math.max(0, GUEST_VISIBLE_CAFES - offset));
     const rows = await this.prisma.$queryRaw<
       { total: number; id: string | null; weeklyVoteCount: number; voteCount: number }[]
-    >(popularPageQuery(filter, offset, take));
+    >(popularPageQuery(filter, offset, limit));
     const total = rows[0]?.total ?? 0;
     const ids = rows.flatMap(({ id }) => (id === null ? [] : [id]));
-    if (!ids.length) return gateCafePage([], total, page, limit, user);
+    if (!ids.length) return cafePage([], total, page, limit);
 
     const cafes = await this.prisma.cafe.findMany({
       where: { id: { in: ids }, isPublished: true, isHidden: false },
@@ -126,7 +124,7 @@ export class CafesService {
       return cafe ? [this.serializeListCafe(cafe, filter.locale, weeklyVoteCount, voteCount)] : [];
     });
 
-    return gateCafePage(data, total, page, limit, user);
+    return cafePage(data, total, page, limit);
   }
 
   private serializeListCafe(cafe: any, locale?: string, weeklyVoteCount = 0, voteCount = 0) {
@@ -214,18 +212,18 @@ export class CafesService {
     }
   }
 
-  private async getVoteCountMaps(cafeIds: string[]) {
+  private async getVoteCountMaps(cafeIds: string[], db: Prisma.TransactionClient = this.prisma) {
     if (!cafeIds.length)
       return { weeklyByCafe: new Map<string, number>(), totalByCafe: new Map<string, number>() };
     const { start, end } = CafeVotesService.weekRange();
     try {
       const [weekly, total] = await Promise.all([
-        this.prisma.cafeVote.groupBy({
+        db.cafeVote.groupBy({
           by: ['cafeId'],
           where: { createdAt: { gte: start, lt: end }, cafeId: { in: cafeIds } },
           _count: { cafeId: true },
         }),
-        this.prisma.cafeVote.groupBy({
+        db.cafeVote.groupBy({
           by: ['cafeId'],
           where: { cafeId: { in: cafeIds } },
           _count: { cafeId: true },
@@ -242,17 +240,39 @@ export class CafesService {
     }
   }
 
-  async findBySlug(slug: string, locale?: string) {
+  private byPublicSlug(slug: string) {
+    return { ...publicCafeWhere, ...(this.isUuid(slug) ? { id: slug } : { slug }) };
+  }
+
+  async findPublicCafeId(slug: string) {
     const cafe = await this.prisma.cafe.findFirst({
-      where: { ...publicCafeWhere, ...(this.isUuid(slug) ? { id: slug } : { slug }) },
-      include: { chain: { select: { id: true, name: true, slug: true } }, _count: { select: { savedCafes: true } } },
+      where: this.byPublicSlug(slug),
+      select: { id: true },
     });
+    if (!cafe) throw new NotFoundException(`Cafe not found with slug: ${slug}`);
+    return cafe.id;
+  }
 
-    if (!cafe) {
-      throw new NotFoundException(`Cafe not found with slug: ${slug}`);
-    }
+  async findPreview(slug: string, locale?: string) {
+    const cafe = await this.prisma.cafe.findFirst({
+      where: this.byPublicSlug(slug),
+      select: { ...cafeListSelect, googleMapsUrl: true },
+    });
+    if (!cafe) throw new NotFoundException(`Cafe not found with slug: ${slug}`);
+    return this.serializeCafeWithVotes(cafe, locale);
+  }
 
-    const { weeklyByCafe, totalByCafe } = await this.getVoteCountMaps([cafe.id]);
+  async findBySlug(slug: string, locale?: string, db: Prisma.TransactionClient = this.prisma) {
+    const cafe = await db.cafe.findFirst({
+      where: this.byPublicSlug(slug),
+      include: { chain: cafeListSelect.chain, _count: cafeListSelect._count },
+    });
+    if (!cafe) throw new NotFoundException(`Cafe not found with slug: ${slug}`);
+    return this.serializeCafeWithVotes(cafe, locale, db);
+  }
+
+  private async serializeCafeWithVotes(cafe: { id: string }, locale?: string, db?: Prisma.TransactionClient) {
+    const { weeklyByCafe, totalByCafe } = await this.getVoteCountMaps([cafe.id], db);
     return this.serializeListCafe(
       cafe,
       locale,
@@ -307,8 +327,6 @@ export class CafesService {
         c.tags, c.tags_en AS "tagsEn",
         c.cover_image AS "coverImage",
         c.cover_image_crop AS "coverImageCrop",
-        c.menu_image AS "menuImage",
-        c.menu_images AS "menuImages",
         ST_Y(c.location::geometry) AS lat,
         ST_X(c.location::geometry) AS lng,
         ROUND(
@@ -361,7 +379,7 @@ export class CafesService {
       .sort((a, b) => Number(a.distance_km) - Number(b.distance_km));
   }
 
-  async findNearbyDiscovery(filter: CafeFilterDto, user?: { id: string }) {
+  async findNearbyDiscovery(filter: CafeFilterDto) {
     if (filter.lat == null || filter.lng == null) {
       throw new Error('Nearby discovery requires lat and lng');
     }
@@ -374,9 +392,7 @@ export class CafesService {
     `;
     const count = Number(total);
     const pageStart = (page - 1) * limit;
-    const readableOnPage = user
-      ? Math.max(0, Math.min(limit, count - pageStart))
-      : Math.max(0, Math.min(limit, count - pageStart, GUEST_VISIBLE_CAFES - pageStart));
+    const readableOnPage = Math.max(0, Math.min(limit, count - pageStart));
     const rows = readableOnPage
       ? await this.prisma.$queryRaw<any[]>(
           discoveryPageQuery(filter, where, pageStart, readableOnPage),
@@ -391,7 +407,7 @@ export class CafesService {
       ),
     );
     const data = await this.enrichDiscoveryRoutes(cafes, filter);
-    return gateCafePage(data, count, page, limit, user);
+    return cafePage(data, count, page, limit);
   }
 
   private async enrichDiscoveryRoutes(cafes: any[], filter: CafeFilterDto) {
@@ -502,48 +518,8 @@ export class CafesService {
   }
 }
 
-// ponytail: fifteen guest previews are current product policy; promote this to plan configuration only for multiple access tiers.
-const GUEST_VISIBLE_CAFES = 15;
-
-type CafePageMeta = {
-  total: number;
-  page: number;
-  limit: number;
-  totalPages: number;
-  discovery?: {
-    displayTotal: number;
-    totalPages: number;
-    teaserSlots: number;
-    previewTotal: number;
-  };
-};
-
-function gateCafePage<T>(
-  data: T[],
-  total: number,
-  page: number,
-  limit: number,
-  user?: { id: string },
-): { data: T[]; meta: CafePageMeta } {
-  const totalPages = Math.ceil(total / limit);
-  const meta = { total, page, limit, totalPages };
-  if (user) return { data, meta };
-
-  const pageStart = (page - 1) * limit;
-  const visible = data.slice(0, Math.max(0, GUEST_VISIBLE_CAFES - pageStart));
-  const pageCapacity = Math.max(0, Math.min(limit, total - (page - 1) * limit));
-  return {
-    data: visible,
-    meta: {
-      ...meta,
-      discovery: {
-        displayTotal: total,
-        totalPages,
-        teaserSlots: Math.max(0, pageCapacity - visible.length),
-        previewTotal: GUEST_VISIBLE_CAFES,
-      },
-    },
-  };
+function cafePage<T>(data: T[], total: number, page: number, limit: number) {
+  return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
 }
 
 function discoveryWhere(filter: CafeFilterDto) {
@@ -700,7 +676,7 @@ function discoveryPageQuery(
       c.parking_location AS "parkingLocation", c.parking_location_en AS "parkingLocationEn",
       c.vibes, c.vibes_en AS "vibesEn", c.purposes, c.purposes_en AS "purposesEn", c.amenities, c.amenities_en AS "amenitiesEn",
       c.tags, c.tags_en AS "tagsEn", c.cover_image AS "coverImage", c.cover_image_crop AS "coverImageCrop",
-      c.menu_image AS "menuImage", c.menu_images AS "menuImages", c.rating, c.is_featured AS "isFeatured",
+      c.rating, c.is_featured AS "isFeatured",
       c.featured_order AS "featuredOrder", c.view_count AS "viewCount", c.created_at AS "createdAt", c.updated_at AS "updatedAt",
       ST_Y(c.location::geometry) AS lat, ST_X(c.location::geometry) AS lng,
       ROUND((ST_Distance(c.location, ${point}) / 1000)::numeric, 2) AS distance_km,

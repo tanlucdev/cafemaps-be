@@ -1,9 +1,12 @@
 import { randomUUID } from 'crypto';
 import {
   Controller,
+  ForbiddenException,
+  UnauthorizedException,
   Delete,
   Get,
   Header,
+  HttpCode,
   Param,
   Post,
   Query,
@@ -11,9 +14,11 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiResponse, ApiOkResponse, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { JwtService } from '@nestjs/jwt';
 import { Request, Response } from 'express';
+import { CafeDetailAccessService } from '../cafe-detail-access/cafe-detail-access.service';
+import { parseCookies } from '../auth/services/auth-cookie.service';
 import { CafesService } from './cafes.service';
 import { CafeFilterDto } from './dto/cafe-filter.dto';
 import { CafeVotesService } from './cafe-votes.service';
@@ -26,6 +31,7 @@ import { RecentlyViewedService } from '../recently-viewed/recently-viewed.servic
 @Controller('cafes')
 export class CafesController {
   constructor(
+    private readonly detailAccess: CafeDetailAccessService,
     private readonly cafesService: CafesService,
     private readonly cafeVotesService: CafeVotesService,
     private readonly jwtService: JwtService,
@@ -33,11 +39,18 @@ export class CafesController {
   ) {}
 
   @Get()
-  @UseGuards(OptionalJwtAuthGuard)
   @Header('Cache-Control', 'private, no-store')
   @ApiOperation({ summary: 'List cafes with filters and pagination' })
-  findAll(@Query() filter: CafeFilterDto, @CurrentUser() user?: { id: string }) {
-    return this.cafesService.findAll(filter, user);
+  findAll(@Query() filter: CafeFilterDto) {
+    return this.cafesService.findAll(filter);
+  }
+
+  @Get('detail-quota')
+  @UseGuards(OptionalJwtAuthGuard)
+  @Header('Cache-Control', 'private, no-store')
+  @ApiOperation({ summary: 'Read the current monthly cafe detail quota without consuming an open' })
+  detailQuota(@Req() req: Request, @CurrentUser() user?: { id: string }) {
+    return this.detailAccess.quota(this.detailAccess.readBrowser(req.headers.cookie), user?.id);
   }
 
   @Get('sitemap/entries')
@@ -61,16 +74,15 @@ export class CafesController {
   }
 
   @Get('nearby/discovery')
-  @UseGuards(OptionalJwtAuthGuard)
   @Header('Cache-Control', 'private, no-store')
-  @ApiOperation({ summary: 'Find nearby cafes with discovery access limits' })
-  findNearbyDiscovery(@Query() filter: CafeFilterDto, @CurrentUser() user?: { id: string }) {
-    return this.cafesService.findNearbyDiscovery(filter, user);
+  @ApiOperation({ summary: 'Find nearby cafe previews' })
+  findNearbyDiscovery(@Query() filter: CafeFilterDto) {
+    return this.cafesService.findNearbyDiscovery(filter);
   }
 
   // Specific routes must be placed BEFORE /:slug
   @Get('nearby')
-  @Header('Cache-Control', 'public, max-age=30')
+  @Header('Cache-Control', 'no-store')
   @ApiOperation({ summary: 'Find cafes near a location (PostGIS, optional OSRM route distance)' })
   @ApiQuery({ name: 'lat', required: true, type: Number })
   @ApiQuery({ name: 'lng', required: true, type: Number })
@@ -141,7 +153,7 @@ export class CafesController {
   }
 
   @Get(':slug/similar')
-  @Header('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
+  @Header('Cache-Control', 'no-store')
   @ApiOperation({ summary: 'Find public cafes with a similar vibe' })
   findSimilar(@Param('slug') slug: string, @Query('locale') locale?: string) {
     return this.cafesService.findSimilar(slug, locale);
@@ -171,7 +183,7 @@ export class CafesController {
     @Res({ passthrough: true }) res: Response,
     @CurrentUser() user?: { id: string },
   ) {
-    const cookies = parseCookieHeader(req.headers.cookie);
+    const cookies = parseCookies(req.headers.cookie);
     const userVisitorKey = await this.getUserVisitorKey(req, cookies);
     const cookieName = 'cafe-anon-id';
     const anonId = cookies[cookieName] || randomUUID();
@@ -205,23 +217,40 @@ export class CafesController {
     }
   }
 
-  @Get(':slug')
-  @Header('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
+  @Post(':slug/detail-access')
+  @UseGuards(OptionalJwtAuthGuard)
+  @HttpCode(200)
+  @Header('Cache-Control', 'private, no-store')
   @ApiOperation({
-    summary: 'Get cafe details by slug',
-    description: 'Includes imageSourceUsernames for gallery credits and experienceUrls for original posts. Each array is empty when no sources are recorded.',
+    summary: 'Open cafe detail and record one distinct monthly access',
+    description: 'Includes imageSourceUsernames for gallery credits and experienceUrls for original posts.',
   })
-  findOne(@Param('slug') slug: string, @Query('locale') locale?: string) {
-    return this.cafesService.findBySlug(slug, locale);
-  }
-}
+  @ApiResponse({ status: 428, description: 'Retry with the guest cookie sent in Set-Cookie' })
+  @ApiResponse({ status: 401, description: 'Sign in to open cafe details' })
+  @ApiResponse({ status: 403, description: 'Account monthly limit reached' })
+  async openDetail(
+    @Param('slug') slug: string,
+    @Query('locale') locale: string | undefined,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @CurrentUser() user?: { id: string },
+  ) {
+    const cafeId = await this.cafesService.findPublicCafeId(slug);
+    const browser = this.detailAccess.requireBrowser(req.headers.cookie, res);
+    const result = await this.detailAccess.open(browser, user?.id, cafeId, (tx) =>
+      this.cafesService.findBySlug(cafeId, locale, tx),
+    );
 
-function parseCookieHeader(cookieHeader?: string) {
-  return Object.fromEntries(
-    (cookieHeader || '').split(';').flatMap((part) => {
-      const index = part.indexOf('=');
-      if (index < 0) return [];
-      return [[part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1).trim())]];
-    }),
-  );
+    if (result.status === 'login-required') throw new UnauthorizedException('DETAIL_LOGIN_REQUIRED');
+    if (result.status === 'guest-quota-exhausted') throw new UnauthorizedException('DETAIL_GUEST_QUOTA_EXHAUSTED');
+    if (result.status === 'quota-exhausted') throw new ForbiddenException('DETAIL_QUOTA_EXHAUSTED');
+    return result.cafe;
+  }
+
+  @Get(':slug')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({ summary: 'Get public cafe preview by slug' })
+  findOne(@Param('slug') slug: string, @Query('locale') locale?: string) {
+    return this.cafesService.findPreview(slug, locale);
+  }
 }

@@ -6,6 +6,7 @@ test('public cafe views persist history only for an authenticated user', async (
   const tracked: string[] = [];
   const persisted: string[] = [];
   const controller = new CafesController(
+    {} as any,
     {
       trackView: async (_cafeId: string, visitor: string) => {
         const counted = tracked.length === 0;

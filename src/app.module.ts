@@ -16,6 +16,7 @@ import { ReviewsModule } from './reviews/reviews.module';
 import { RecentlyViewedModule } from './recently-viewed/recently-viewed.module';
 import { ChainsModule } from './chains/chains.module';
 import { CoffeeMeetupsModule } from './coffee-meetups/coffee-meetups.module';
+import { PaymentsModule } from './payments/payments.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -24,6 +25,7 @@ import { HealthController } from './health.controller';
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
     CafesModule,
+    PaymentsModule,
     AuthModule,
     SavedModule,
     SubmissionsModule,

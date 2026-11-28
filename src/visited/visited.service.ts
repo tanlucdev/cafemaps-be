@@ -48,7 +48,6 @@ export class VisitedService {
           'tagsEn', c.tags_en,
           'coverImage', c.cover_image,
           'coverImageCrop', c.cover_image_crop,
-          'images', c.images,
           'lat', ST_Y(c.location::geometry),
           'lng', ST_X(c.location::geometry)
         ) AS cafe

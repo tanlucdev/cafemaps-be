@@ -69,7 +69,11 @@ export function parseCookies(cookieHeader?: string) {
     (cookieHeader || '').split(';').flatMap((part) => {
       const index = part.indexOf('=');
       if (index < 0) return [];
-      return [[part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1).trim())]];
+      try {
+        return [[part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1).trim())]];
+      } catch {
+        return [];
+      }
     }),
   );
 }

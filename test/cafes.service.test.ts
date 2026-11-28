@@ -123,7 +123,6 @@ test('findAll uses districts before legacy district for exact matching, count, s
       page: 2,
       limit: 1,
     },
-    { id: 'member-1' },
   );
   const where = {
     isPublished: true,
@@ -231,7 +230,7 @@ test('findAll passes rating sort to Prisma before pagination', async () => {
     },
   });
 
-  const result = await service.findAll({ sort: 'rating', page: 2, limit: 9 }, { id: 'member-1' });
+  const result = await service.findAll({ sort: 'rating', page: 2, limit: 9 });
 
   assert.equal(findManyArgs.skip, 9);
   assert.equal(findManyArgs.take, 9);
@@ -243,7 +242,7 @@ test('findAll passes rating sort to Prisma before pagination', async () => {
   assert.deepEqual(result.meta, { total: 1, page: 2, limit: 9, totalPages: 1 });
 });
 
-test('guest discovery allows a full first page before locking later results', async () => {
+test('guest discovery returns public previews and pagination', async () => {
   const queries: any[] = [];
   const { service } = createService({
     prisma: {
@@ -262,15 +261,10 @@ test('guest discovery allows a full first page before locking later results', as
 
   assert.equal(queries.length, 2);
   assert.equal(guest.data.length, 9);
-  assert.deepEqual(guest.meta.discovery, {
-    displayTotal: 18,
-    previewTotal: 15,
-    teaserSlots: 0,
-    totalPages: 2,
-  });
+  assert.deepEqual(guest.meta, { total: 18, page: 1, limit: 9, totalPages: 2 });
 });
 
-test('guest list allows fifteen filtered cafes before locking later results', async () => {
+test('guest list returns every page of filtered previews', async () => {
   const cafes = Array.from({ length: 27 }, (_, index) => ({
     id: String(index),
     _count: { savedCafes: 0 },
@@ -289,51 +283,8 @@ test('guest list allows fifteen filtered cafes before locking later results', as
   const secondPage = await service.findAll({ search: 'coffee', sort: 'rating', page: 2, limit: 9 });
   const thirdPage = await service.findAll({ search: 'coffee', sort: 'rating', page: 3, limit: 9 });
 
-  assert.equal(firstPage.data.length, 9);
-  assert.deepEqual(firstPage.meta.discovery, {
-    displayTotal: 27,
-    previewTotal: 15,
-    totalPages: 3,
-    teaserSlots: 0,
-  });
-  assert.equal(secondPage.data.length, 6);
-  assert.deepEqual(secondPage.meta.discovery, {
-    displayTotal: 27,
-    previewTotal: 15,
-    totalPages: 3,
-    teaserSlots: 3,
-  });
-  assert.equal(thirdPage.data.length, 0);
-  assert.deepEqual(thirdPage.meta.discovery, {
-    displayTotal: 27,
-    previewTotal: 15,
-    totalPages: 3,
-    teaserSlots: 9,
-  });
-});
-
-test('member discovery receives all records and no discovery metadata', async () => {
-  let calls = 0;
-  const { service } = createService({
-    prisma: {
-      $queryRaw: async () => {
-        calls += 1;
-        return calls === 1
-          ? [{ total: 9n }]
-          : Array.from({ length: 9 }, (_, index) => ({
-              id: String(index),
-              _count: { savedCafes: 0 },
-            }));
-      },
-    },
-  });
-  const member = await service.findNearbyDiscovery(
-    { lat: 10.77, lng: 106.7, limit: 9 },
-    { id: 'member-1' },
-  );
-
-  assert.equal(member.data.length, 9);
-  assert.equal(member.meta.discovery, undefined);
+  assert.deepEqual([firstPage, secondPage, thirdPage].map(({ data }) => data.length), [9, 9, 9]);
+  assert.deepEqual(thirdPage.meta, { total: 27, page: 3, limit: 9, totalPages: 3 });
 });
 
 test('opening hours filter contract accepts legacy input, filters both modes, rejects invalid input', async () => {
@@ -399,10 +350,9 @@ test('popular fetches only page IDs and preserves SQL order and counts', async (
     },
   });
 
-  const member = { id: 'member' };
-  const first = await service.findAll({ limit: 2 }, member);
-  const second = await service.findAll({ sort: 'popular', page: 2, limit: 2 }, member);
-  const empty = await service.findAll({ page: 4, limit: 2 }, member);
+  const first = await service.findAll({ limit: 2 });
+  const second = await service.findAll({ sort: 'popular', page: 2, limit: 2 });
+  const empty = await service.findAll({ page: 4, limit: 2 });
 
   assert.deepEqual(
     first.data.map(({ id, weeklyVoteCount, voteCount }) => [id, weeklyVoteCount, voteCount]),
@@ -421,7 +371,7 @@ test('popular fetches only page IDs and preserves SQL order and counts', async (
   })));
 });
 
-test('popular guest pages hydrate only the first fifteen cafes and keep teaser totals', async () => {
+test('popular guest pages hydrate the full public page', async () => {
   const queryBounds: unknown[][] = [];
   const detailSizes: number[] = [];
   const { service } = createService({
@@ -446,11 +396,10 @@ test('popular guest pages hydrate only the first fifteen cafes and keep teaser t
   const second = await service.findAll({ page: 2, limit: 9 });
   const third = await service.findAll({ page: 3, limit: 9 });
 
-  assert.deepEqual(queryBounds, [[9, 0], [6, 9], [0, 18]]);
-  assert.deepEqual(detailSizes, [9, 6]);
-  assert.deepEqual([first.data.length, second.data.length, third.data.length], [9, 6, 0]);
+  assert.deepEqual(queryBounds, [[9, 0], [9, 9], [9, 18]]);
+  assert.deepEqual(detailSizes, [9, 9, 9]);
+  assert.deepEqual([first.data.length, second.data.length, third.data.length], [9, 9, 9]);
   assert.deepEqual([first, second, third].map(({ meta }) => meta.total), [27, 27, 27]);
-  assert.deepEqual([first, second, third].map(({ meta }) => meta.discovery?.teaserSlots), [0, 3, 9]);
 });
 
 test('findAll localizes cafe fields and searches both languages', async () => {

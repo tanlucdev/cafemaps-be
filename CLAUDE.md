@@ -105,7 +105,36 @@ src/
 | GET | `/api/cafes/nearby` | ❌ | Cafe gần nhất (PostGIS) |
 | GET | `/api/cafes/districts` | ❌ | Danh sách quận có cafe |
 | GET | `/api/cafes/quiz-match` | ❌ | Top 10 theo vibe + purpose |
-| GET | `/api/cafes/:slug` | ❌ | Chi tiết cafe |
+| GET | `/api/cafes/:slug` | ❌ | Bản xem trước công khai |
+| POST | `/api/cafes/:slug/detail-access` | Khách hoặc JWT | Chi tiết gồm menu và album. Phản hồi `private, no-store` |
+
+Lượt được tính theo quán duy nhất và tháng Việt Nam. Lần gọi POST đầu tiên trả
+`428` kèm cookie `cafe-detail-guest`. Gửi lại cùng cookie để nhận chi tiết.
+`401` yêu cầu đăng nhập. `403` báo hết hạn mức miễn phí của tài khoản.
+
+Cấu hình backend staging với `CAFE_DETAIL_ACCESS_MODE=enforce`. Production dùng
+`measure` để phục vụ toàn bộ danh sách và ghi nhận lượt, kể cả lượt vượt hạn mức.
+Trước khi bật giới hạn trên production, xóa cache CDN cũ của API quán, trang chi tiết
+và Markdown. Xác nhận một đơn payOS thật 10.000₫ chỉ cấp quyền 30 ngày một lần.
+
+### Thanh toán PayOS
+
+Backend đọc `PAYOS_CLIENT_ID`, `PAYOS_API_KEY`, `PAYOS_CHECKSUM_KEY` và
+`PAYOS_RETURN_URL`. Đặt URL quay về là trang Cafe Maps tương ứng với môi trường.
+Khai báo `https://<backend>/api/payments/payos/webhook` trong kênh thanh toán PayOS.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| POST | `/api/payments/cafe-detail` | JWT. Tạo hoặc dùng lại đơn 10.000₫ và trả QR. Mã hết hạn sau 15 phút. |
+| GET | `/api/payments/cafe-detail/:orderCode` | JWT. Chủ đơn đọc trạng thái khi chờ thanh toán. |
+| POST | `/api/payments/payos/webhook` | Chữ ký PayOS. Xác nhận đơn đúng số tiền và cấp quyền 30 ngày một lần. |
+
+Webhook PayOS cập nhật trạng thái đơn. Khi popup mở và tab đang hiển thị,
+trình duyệt polling khoảng 2 giây trong 30 giây đầu, 5 giây đến phút thứ hai
+và 15 giây sau đó. Mỗi đơn có độ lệch tối đa 20% để tránh gọi đồng loạt.
+Polling dừng khi đã thanh toán, đóng popup hoặc quá một phút sau khi QR hết hạn.
+Mở lại popup hoặc quay về tab sẽ kiểm tra ngay. Chế độ local `NODE_ENV=development`, `PAYOS_MOCK_ENABLED=true` với
+PostgreSQL loopback hiển thị QR mẫu và nút hoàn tất mô phỏng.
 
 ### Saved (Cần JWT)
 
