@@ -121,7 +121,16 @@ và Markdown. Xác nhận một đơn payOS thật 10.000₫ chỉ cấp quyền
 
 Backend đọc `PAYOS_CLIENT_ID`, `PAYOS_API_KEY`, `PAYOS_CHECKSUM_KEY` và
 `PAYOS_RETURN_URL`. Đặt URL quay về là trang Cafe Maps tương ứng với môi trường.
-Khai báo `https://<backend>/api/payments/payos/webhook` trong kênh thanh toán PayOS.
+Sau khi deploy backend có khóa PayOS, đăng ký webhook của kênh từ môi trường
+đã nạp các khóa. Lệnh kiểm tra endpoint công khai trước khi đổi URL của kênh.
+
+```bash
+npm run payos:register-webhook -- https://<backend-host>
+```
+
+Nếu khóa nằm trong `.env` local, dùng
+`node --env-file=.env scripts/register-payos-webhook.cjs https://<backend-host>`.
+Giữ `CAFE_DETAIL_ACCESS_MODE=measure` cho đến khi xác nhận đơn thật cấp quyền.
 
 | Method | Path | Mô tả |
 |--------|------|-------|

@@ -22,6 +22,7 @@
     "migrate:images:rehearse": "ts-node scripts/migrate-images-to-cloudinary.ts --mode=rehearse",
     "migrate:images:apply": "ts-node scripts/migrate-images-to-cloudinary.ts --mode=apply --write-db",
     "migrate:images:rollback": "ts-node scripts/migrate-images-to-cloudinary.ts --mode=rollback --write-db",
+    "payos:register-webhook": "node scripts/register-payos-webhook.cjs",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
